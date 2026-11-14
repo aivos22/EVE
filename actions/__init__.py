@@ -16,12 +16,13 @@ from actions.apps import open_app
 from actions.memory_tools import forget_about_sir, remember_about_sir
 from actions.weather import get_weather
 from actions.web_search import search_web
+from actions.websites import open_website
 from actions.wikipedia import look_up_wikipedia
 
 TOOLS = [get_weather, look_up_wikipedia, search_web, remember_about_sir, forget_about_sir]
 # Built, and testable with "python -m actions", but not offered to Gemini yet.
 # (Step 5 of the actions work moves these into TOOLS.)
-NOT_WIRED_YET = [open_app]
+NOT_WIRED_YET = [open_app, open_website]
 _BY_NAME = {tool.__name__: tool for tool in TOOLS + NOT_WIRED_YET}
 
 # What the log says while each tool runs, e.g. "[ACTION] Checking weather: Leeds".
@@ -32,6 +33,7 @@ LABELS = {
     "remember_about_sir": "Remembering",
     "forget_about_sir": "Forgetting fact",
     "open_app": "Opening",
+    "open_website": "Opening",
 }
 
 
