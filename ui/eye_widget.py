@@ -27,7 +27,7 @@ RING_SHAPES = [
     {"inner": 0.36, "outer": 0.45, "segments": 18, "gap": 5, "push": 0.10},
     {"inner": 0.25, "outer": 0.32, "segments": 24, "gap": 4, "push": 0.11},
 ]
-PUPIL_RADIUS = 0.13      # fraction of the eye radius
+PUPIL_RADIUS = 0.19      # fraction of the eye radius
 FRAME_RADIUS = 0.95      # the big outer circle from Chris's sketch
 LOOK_DISTANCE = 0.10     # how far the iris can drift when looking around
 
@@ -66,9 +66,17 @@ class EyeWidget(QWidget):
         size = radius * open_scale * (1 + a.pulse * 0.05)
 
         self._draw_frame(p, centre, radius)
+
+        # Blink: squash the iris flat vertically, like an eyelid closing.
+        # translate/scale/translate = "squash around the iris centre, not the corner".
+        p.save()
+        p.translate(iris_centre)
+        p.scale(1.0, 1.0 - 0.92 * a.blink)
+        p.translate(-iris_centre)
         self._draw_glow(p, iris_centre, size)
         self._draw_rings(p, iris_centre, size)
         self._draw_pupil(p, iris_centre, size)
+        p.restore()
         p.end()
 
     # --- Each layer of the eye ------------------------------------------
@@ -115,13 +123,33 @@ class EyeWidget(QWidget):
             span = step - shape["gap"]
             for i in range(shape["segments"]):
                 start = rotation + i * step
-                # Every third block is brighter, for a mechanical look.
-                strength = 0.85 if i % 3 == 0 else 0.45
-                fill = with_alpha(theme.CYAN, (0.15 + 0.35 * a.glow) * strength * fade_in)
-                edge = with_alpha(theme.CYAN, (0.5 + 0.5 * a.glow) * strength * fade_in)
+                strength = self._block_brightness(ring, i, step, start + span / 2)
+                fill = with_alpha(theme.CYAN, (0.10 + 0.55 * strength) * (0.6 + 0.4 * a.glow) * fade_in)
+                edge = with_alpha(theme.CYAN, (0.30 + 0.70 * strength) * fade_in)
                 p.setBrush(fill)
                 p.setPen(QPen(edge, 1.2))
                 p.drawPath(self._block_path(c, inner, outer, start, span))
+
+    @staticmethod
+    def _block_brightness(ring, index: int, step: float, centre_angle: float) -> float:
+        """
+        How lit one block is, from 0 (dim) to 1 (bright). Three things add up:
+        a small fixed variation per block, the drifting highlight, and any sparks.
+        """
+        base = 0.25 + 0.15 * ((index * 7) % 5) / 4   # same every frame, so it looks built-in
+
+        # How far (in degrees) this block is from the ring's drifting highlight.
+        distance = abs((centre_angle - ring.highlight + 180) % 360 - 180)
+        highlight = 0.75 * math.exp(-(distance / 35) ** 2)
+
+        # Sparks are stored as angles on the ring, so they turn with it.
+        spark = 0.0
+        local = (index + 0.5) * step
+        for angle, brightness in ring.sparks:
+            if abs((angle - local + 180) % 360 - 180) < step / 2:
+                spark = max(spark, brightness)
+
+        return min(1.0, base + highlight + spark * 0.8)
 
     @staticmethod
     def _block_path(c: QPointF, inner: float, outer: float, start: float, span: float) -> QPainterPath:
@@ -139,25 +167,44 @@ class EyeWidget(QWidget):
         return path
 
     def _draw_pupil(self, p: QPainter, c: QPointF, size: float) -> None:
-        """A dark centre with a glowing cyan rim and a bright core."""
+        """
+        The glowing core, in layers: a soft halo that bleeds into the inner
+        ring, a bright disc, a rim, an inner lens line and a small reflection.
+        """
         a = self.animator
         r = PUPIL_RADIUS * size * a.pupil_scale
-
+        g = a.glow
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(0, 8, 12, 230))
-        p.drawEllipse(c, r, r)
 
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(with_alpha(theme.CYAN, 0.6 + 0.4 * a.glow), 2))
-        p.drawEllipse(c, r, r)
+        # 1. Halo: a big soft glow reaching out past the pupil into the inner ring.
+        halo = QRadialGradient(c, r * 2.3)
+        halo.setColorAt(0.0, with_alpha(theme.CYAN, 0.55 * g))
+        halo.setColorAt(0.45, with_alpha(theme.CYAN, 0.22 * g))
+        halo.setColorAt(1.0, with_alpha(theme.CYAN, 0.0))
+        p.setBrush(halo)
+        p.drawEllipse(c, r * 2.3, r * 2.3)
 
-        core = QRadialGradient(c, r * 0.6)
-        core.setColorAt(0.0, with_alpha(QColor(220, 255, 255), 0.9))
-        core.setColorAt(0.4, with_alpha(theme.CYAN, 0.5 + 0.4 * a.glow))
-        core.setColorAt(1.0, with_alpha(theme.CYAN, 0.0))
-        p.setPen(Qt.NoPen)
+        # 2. The core disc: white-hot centre fading to deep cyan at the edge.
+        core = QRadialGradient(c, r)
+        core.setColorAt(0.0, with_alpha(QColor(235, 255, 255), 0.95))
+        core.setColorAt(0.25, with_alpha(QColor(150, 245, 255), 0.85 + 0.15 * g))
+        core.setColorAt(0.65, with_alpha(theme.CYAN, 0.55 + 0.3 * g))
+        core.setColorAt(0.92, QColor(0, 70, 90, 230))
+        core.setColorAt(1.0, QColor(0, 40, 55, 240))
         p.setBrush(core)
-        p.drawEllipse(c, r * 0.6, r * 0.6)
+        p.drawEllipse(c, r, r)
+
+        # 3. Rim and an inner "lens" line.
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(with_alpha(theme.CYAN, 0.7 + 0.3 * g), 2))
+        p.drawEllipse(c, r, r)
+        p.setPen(QPen(with_alpha(QColor(220, 255, 255), 0.25), 1))
+        p.drawEllipse(c, r * 0.7, r * 0.7)
+
+        # 4. A small reflection up and to the left, which makes it read as an eye.
+        p.setPen(Qt.NoPen)
+        p.setBrush(with_alpha(QColor(255, 255, 255), 0.55))
+        p.drawEllipse(QPointF(c.x() - r * 0.35, c.y() - r * 0.38), r * 0.13, r * 0.09)
 
 
 if __name__ == "__main__":

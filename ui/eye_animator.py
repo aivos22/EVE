@@ -42,6 +42,11 @@ class Ring:
         self.speed = 0.0              # current speed (smoothly changes)
         self.expand = 0.0             # 0 = resting, 1 = fully pushed outward
         self.twist = 0.0              # extra rotation used by the startup twist
+        # A bright spot that drifts round the ring on its own (screen angle, degrees).
+        self.highlight = random.uniform(0, 360)
+        self.highlight_speed = random.choice([-1, 1]) * random.uniform(20, 45)
+        # Sparks: short flashes on single blocks. Each is [angle on the ring, brightness 0-1].
+        self.sparks: list[list[float]] = []
 
 
 # How each state behaves. Keeping this as a table means you can tune
@@ -53,10 +58,11 @@ class Ring:
 STATE_SETTINGS = {
     EyeState.BOOTING:   {"spin": 0.5, "expand": 0.0, "pupil": 0.6, "glow": 0.3},
     EyeState.IDLE:      {"spin": 1.0, "expand": 0.0, "pupil": 1.0, "glow": 0.5},
-    EyeState.LISTENING: {"spin": 2.5, "expand": 1.0, "pupil": 1.4, "glow": 0.8},
+    EyeState.LISTENING: {"spin": 2.5, "expand": 1.0, "pupil": 1.45, "glow": 0.8},
     EyeState.THINKING:  {"spin": 7.0, "expand": 0.3, "pupil": 0.8, "glow": 0.7},
-    EyeState.SPEAKING:  {"spin": 1.5, "expand": 0.2, "pupil": 1.1, "glow": 0.7},
+    EyeState.SPEAKING:  {"spin": 1.5, "expand": 0.2, "pupil": 1.05, "glow": 0.7},
     EyeState.LOOKING:   {"spin": 1.2, "expand": 0.1, "pupil": 1.0, "glow": 0.6},
+    EyeState.SHUTDOWN:  {"spin": 3.0, "expand": 0.0, "pupil": 0.3, "glow": 0.0},
 }
 
 
@@ -84,6 +90,7 @@ class EyeAnimator(QObject):
         self.pulse = 0.0         # speaking pulse 0 to 1
         self.look_x = 0.0        # pupil drift, -1 (left) to 1 (right)
         self.look_y = 0.0        # pupil drift, -1 (up) to 1 (down)
+        self.blink = 0.0         # 0 = open, 1 = fully shut (mid-blink)
 
         self._base_glow = 0.3
         self._time = 0.0                  # seconds since start, for wavy motion
@@ -91,6 +98,10 @@ class EyeAnimator(QObject):
         self._audio_fresh_for = 0.0       # seconds the real audio level stays "fresh"
         self._look_target = (0.0, 0.0)
         self._next_look_change = 0.0
+        self._gaze = (0.0, 0.0)           # where the mouse (or later a camera) wants us to look
+        self._gaze_fresh_for = 0.0
+        self._blink_time = -1.0           # seconds into the current blink, -1 = not blinking
+        self._next_blink = random.uniform(3, 6)
 
         # A timer that calls _tick about 60 times a second.
         self._clock = QElapsedTimer()
@@ -112,6 +123,16 @@ class EyeAnimator(QObject):
         self.opening = 0.0
         self.set_state(EyeState.BOOTING)
 
+    def set_gaze(self, x: float, y: float) -> None:
+        """Ask the eye to look towards a point. -1..1 left/right and up/down."""
+        self._gaze = (max(-1.0, min(1.0, x)), max(-1.0, min(1.0, y)))
+        self._gaze_fresh_for = 1.0   # follow it for a second unless told again
+
+    def do_blink(self) -> None:
+        """Blink right now."""
+        if self._blink_time < 0:
+            self._blink_time = 0.0
+
     def set_audio_level(self, level: float) -> None:
         """Feed in the current voice volume (0 to 1) while speaking."""
         self._audio_level = max(0.0, min(1.0, level))
@@ -129,9 +150,10 @@ class EyeAnimator(QObject):
         self._update_rings(dt, settings)
         self._update_pulse(dt)
         self._update_look(dt)
+        self._update_blink(dt)
 
         # Pupil and glow ease towards what the state wants.
-        self.pupil_scale = approach(self.pupil_scale, settings["pupil"] + self.pulse * 0.25, 6, dt)
+        self.pupil_scale = approach(self.pupil_scale, settings["pupil"] + self.pulse * 0.15, 6, dt)
         self._base_glow = approach(self._base_glow, settings["glow"], 3, dt)
         breathing = 0.15 * math.sin(self._time * 1.2)  # slow in-and-out glow
         self.glow = max(0.0, min(1.0, self._base_glow + breathing + self.pulse * 0.3))
@@ -139,8 +161,11 @@ class EyeAnimator(QObject):
         self.updated.emit()
 
     def _update_opening(self, dt: float) -> None:
-        # The startup opening runs while booting and finishes if we leave booting early.
-        self.opening = approach(self.opening, 1.0, 1.2, dt)
+        # Open up (startup) normally; twist closed again when shutting down.
+        if self.state == EyeState.SHUTDOWN:
+            self.opening = approach(self.opening, 0.0, 2.0, dt)
+        else:
+            self.opening = approach(self.opening, 1.0, 1.2, dt)
 
     def _update_rings(self, dt: float, settings: dict) -> None:
         for i, ring in enumerate(self.rings):
@@ -155,6 +180,16 @@ class EyeAnimator(QObject):
             # Startup twist: each ring starts turned up to 180 degrees the
             # opposite way and untwists as `opening` goes from 0 to 1.
             ring.twist = (1 - self.opening) * 180 * -ring.direction
+
+            # Drift the highlight round the ring (faster when the rings spin faster).
+            ring.highlight = (ring.highlight + ring.highlight_speed * settings["spin"] ** 0.5 * dt) % 360
+
+            # Now and then, flash a random block. Sparks fade out over about a second.
+            if random.random() < dt * 0.8:
+                ring.sparks.append([random.uniform(0, 360), 1.0])
+            for spark in ring.sparks:
+                spark[1] -= dt * 1.2
+            ring.sparks = [sp for sp in ring.sparks if sp[1] > 0]
 
     def _update_pulse(self, dt: float) -> None:
         if self.state != EyeState.SPEAKING:
@@ -174,11 +209,34 @@ class EyeAnimator(QObject):
                 self._look_target = (random.uniform(-1, 1), random.uniform(-0.7, 0.7))
                 self._next_look_change = self._time + random.uniform(1.0, 2.5)
             tx, ty = self._look_target
+        elif self._gaze_fresh_for > 0 and self.state not in (EyeState.BOOTING, EyeState.SHUTDOWN):
+            # Follow the mouse, but not all the way: 60% feels more natural.
+            tx, ty = self._gaze[0] * 0.6, self._gaze[1] * 0.6
         else:
             tx, ty = 0.0, 0.0  # look straight ahead
+        self._gaze_fresh_for = max(0.0, self._gaze_fresh_for - dt)
         self.look_x = approach(self.look_x, tx, 4, dt)
         self.look_y = approach(self.look_y, ty, 4, dt)
 
+
+    def _update_blink(self, dt: float) -> None:
+        # Every 3 to 7 seconds, blink (but not while booting).
+        if self._blink_time < 0:
+            self._next_blink -= dt
+            if self._next_blink <= 0 and self.state not in (EyeState.BOOTING, EyeState.SHUTDOWN):
+                self.do_blink()
+                self._next_blink = random.uniform(3, 7)
+            return
+        # A blink: shut fast (0.08 s), open a little slower (0.15 s).
+        self._blink_time += dt
+        t = self._blink_time
+        if t < 0.08:
+            self.blink = t / 0.08
+        elif t < 0.23:
+            self.blink = 1 - (t - 0.08) / 0.15
+        else:
+            self.blink = 0.0
+            self._blink_time = -1.0
 
 if __name__ == "__main__":
     # Quick self-test with no window: run  .venv\Scripts\python -m ui.eye_animator

@@ -1,14 +1,15 @@
 """
-E.V.E.'s startup: types out the boot text and opens the eye.
+E.V.E.'s startup: writes the boot lines and opens the eye.
 
-This is a "director": it doesn't draw anything. It tells the animator
-to replay the twist-open, types the text one letter at a time, and
-when it's done switches the eye to IDLE. Whoever wants to show the
-text (the HUD window) listens to the `text_changed` signal.
+This is a "director": it draws nothing. It tells the animator to replay
+the twist-open, sends the boot lines to the event log (which types them
+out), and once the last line is typed switches the eye to IDLE. After
+that the same log keeps going as E.V.E.'s live feed.
 """
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from ui.event_log import EventLog
 from ui.eye_animator import EyeAnimator
 from ui.eye_state import EyeState
 
@@ -18,61 +19,69 @@ BOOT_LINES = [
     "CALIBRATING OPTICS... OK",
     "SYSTEMS ONLINE",
 ]
-TYPE_SPEED_MS = 35      # time between letters
-LINE_PAUSE_MS = 350     # pause at the end of each line
-CLEAR_AFTER_MS = 2500   # how long the finished text stays before clearing
 
 
 class BootSequence(QObject):
-    text_changed = Signal(str)   # the full text typed so far
-    finished = Signal()          # the boot is complete
+    finished = Signal()   # the boot is complete
 
-    def __init__(self, animator: EyeAnimator, parent=None):
+    def __init__(self, animator: EyeAnimator, event_log: EventLog, parent=None):
         super().__init__(parent)
         self.animator = animator
-        self._line = 0       # which line we're typing
-        self._char = 0       # how many letters of that line are shown
-        self._timer = QTimer(self)
-        self._timer.setSingleShot(True)   # fire once, we re-arm it each time
-        self._timer.timeout.connect(self._type_next)
+        self.event_log = event_log
+        self.running = False
+        # When the log has typed everything, the boot is over.
+        event_log.queue_empty.connect(self._on_log_done)
 
     def start(self) -> None:
-        """Begin (or restart) the boot from the first letter."""
-        self._line = 0
-        self._char = 0
-        self.animator.restart_boot()      # rings snap closed and start twisting open
-        self.text_changed.emit("")
-        self._timer.start(400)            # short pause before the first letter
+        """Begin (or restart) the boot."""
+        self.running = True
+        self.event_log.clear()
+        self.animator.restart_boot()   # rings snap closed and start twisting open
+        # A short pause before the first line, so the rings get going first.
+        QTimer.singleShot(400, self._write_lines)
 
-    def _type_next(self) -> None:
-        line = BOOT_LINES[self._line]
-        self._char += 1
-        self.text_changed.emit(self._current_text())
+    def _write_lines(self) -> None:
+        for line in BOOT_LINES:
+            self.event_log.log(line, source="BOOT")
 
-        if self._char < len(line):
-            self._timer.start(TYPE_SPEED_MS)       # next letter on this line
-        elif self._line < len(BOOT_LINES) - 1:
-            self._line += 1                         # move to the next line
-            self._char = 0
-            self._timer.start(LINE_PAUSE_MS)
-        else:
-            self._finish()
+    def _on_log_done(self) -> None:
+        if self.running:
+            self.running = False
+            self.animator.set_state(EyeState.IDLE)
+            self.finished.emit()
 
-    def _current_text(self) -> str:
-        done = BOOT_LINES[: self._line]                       # whole lines already typed
-        partial = BOOT_LINES[self._line][: self._char]        # the line being typed
-        cursor = "_" if self._char < len(BOOT_LINES[self._line]) else ""
-        return "\n".join(["> " + l for l in done] + ["> " + partial + cursor])
 
-    def _finish(self) -> None:
-        self.animator.set_state(EyeState.IDLE)
-        self.finished.emit()
-        # Clear the text a little later (unless the boot was restarted meanwhile).
-        QTimer.singleShot(CLEAR_AFTER_MS, self._clear_if_done)
+SHUTDOWN_LINES = [
+    "SHUTTING DOWN...",
+    "SAVING STATE... OK",
+    "GOODBYE",
+]
 
-    def _clear_if_done(self) -> None:
-        if not self._timer.isActive() and self.animator.state != EyeState.BOOTING:
-            self.text_changed.emit("")
+
+class ShutdownSequence(QObject):
+    """The boot in reverse: rings twist closed, glow fades, goodbye lines typed."""
+
+    finished = Signal()   # safe to close the window now
+
+    def __init__(self, animator: EyeAnimator, event_log: EventLog, parent=None):
+        super().__init__(parent)
+        self.animator = animator
+        self.event_log = event_log
+        self.running = False
+        event_log.queue_empty.connect(self._on_log_done)
+
+    def start(self) -> None:
+        if self.running:
+            return   # already shutting down; ignore extra clicks
+        self.running = True
+        self.animator.set_state(EyeState.SHUTDOWN)
+        for line in SHUTDOWN_LINES:
+            self.event_log.log(line, source="SYS")
+
+    def _on_log_done(self) -> None:
+        if self.running:
+            # Give the rings a moment to finish closing before we say "done".
+            QTimer.singleShot(300, self.finished.emit)
 
 
 if __name__ == "__main__":
@@ -82,21 +91,16 @@ if __name__ == "__main__":
 
     app = QCoreApplication(sys.argv)
     animator = EyeAnimator()
-    boot = BootSequence(animator)
-    boot.finished.connect(lambda: print(f"\n[boot finished, eye is now {animator.state.name}]"))
-    boot.finished.connect(lambda: QTimer.singleShot(200, app.quit))
+    log = EventLog()
+    boot = BootSequence(animator, log)
+    text = {"now": ""}
+    log.text_changed.connect(lambda t: text.update(now=t))
 
-    last = {"lines": 0}
+    def done():
+        print(text["now"])
+        print(f"\n[boot finished, eye is now {animator.state.name}]")
+        QTimer.singleShot(100, app.quit)
 
-    def show(text: str):
-        # Print each line once it's fully typed, so the terminal isn't flooded.
-        lines = text.split("\n")
-        complete = [l for l in lines if not l.endswith("_")]
-        for l in complete[last["lines"]:]:
-            if l.strip() not in ("", ">"):
-                print(l)
-        last["lines"] = len(complete)
-
-    boot.text_changed.connect(show)
+    boot.finished.connect(done)
     boot.start()
     app.exec()

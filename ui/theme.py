@@ -7,6 +7,8 @@ so you never have to hunt through drawing code to restyle things.
 
 from PySide6.QtGui import QColor, QFont
 
+from ui.eye_state import EyeState
+
 # --- Colours -------------------------------------------------------------
 # QColor(red, green, blue, alpha). Alpha is see-through-ness: 0 = invisible, 255 = solid.
 
@@ -19,6 +21,18 @@ TEXT = QColor(190, 245, 255)              # light cyan-white for readable text
 TEXT_DIM = QColor(120, 180, 195)          # greyer text for labels
 WARNING = QColor(255, 170, 0)             # amber, for things like high CPU use
 DANGER = QColor(255, 70, 90)              # red, e.g. the close button on hover
+
+# --- How each state is shown in the status line -------------------------
+# (word shown on screen, colour). IDLE is shown as STANDBY, LOOKING as SCANNING.
+STATE_STYLE = {
+    EyeState.BOOTING:   ("BOOTING", WARNING),
+    EyeState.IDLE:      ("STANDBY", CYAN),
+    EyeState.LISTENING: ("LISTENING", QColor(60, 255, 160)),   # green: "I hear you"
+    EyeState.THINKING:  ("THINKING", QColor(170, 130, 255)),   # violet: working
+    EyeState.SPEAKING:  ("SPEAKING", QColor(255, 215, 100)),   # warm gold: talking
+    EyeState.LOOKING:   ("SCANNING", QColor(90, 170, 255)),    # blue: looking around
+    EyeState.SHUTDOWN:  ("SHUTTING DOWN", DANGER),
+}
 
 # --- Fonts ---------------------------------------------------------------
 # Consolas ships with Windows and gives a techy, monospaced look.
@@ -34,10 +48,10 @@ def font(size: int, bold: bool = False) -> QFont:
 
 
 # --- Sizes ---------------------------------------------------------------
-WINDOW_WIDTH = 1100
-WINDOW_HEIGHT = 700
+WINDOW_WIDTH = 1200
+WINDOW_HEIGHT = 760
 CORNER_RADIUS = 18        # how rounded the window corners are
-PANEL_WIDTH = 220         # width of each side panel
+PANEL_WIDTH = 270         # width of each side panel
 FPS = 60                  # animation frames per second
 
 

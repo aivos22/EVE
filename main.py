@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from PySide6.QtWidgets import QApplication
 
 from paths import BASE_DIR
+from ui.event_log import EventLog
 from ui.eye_animator import EyeAnimator
 from ui.hud_window import HudWindow
 
@@ -21,7 +22,8 @@ def main():
     # the voice and brain code can be handed the same animator and drive
     # the eye's state (e.g. animator.set_state(EyeState.LISTENING)).
     animator = EyeAnimator()
-    window = HudWindow(animator)
+    event_log = EventLog()   # the same idea for the log feed: event_log.log("...")
+    window = HudWindow(animator, event_log)
     window.show()
 
     sys.exit(app.exec())

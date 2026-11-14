@@ -16,6 +16,7 @@ class EyeState(Enum):
     THINKING = "thinking"    # working: rings spin faster
     SPEAKING = "speaking"    # talking: eye pulses with the voice volume
     LOOKING = "looking"      # curious: pupil drifts around
+    SHUTDOWN = "shutdown"    # closing: rings twist shut and the glow fades out
 
 
 # Temporary test keys (1-5) used by the HUD window until voice control exists.

@@ -33,9 +33,10 @@ class Panel(QWidget):
         super().__init__(parent)
         self.setFixedWidth(theme.PANEL_WIDTH)
         self.body = QVBoxLayout(self)
-        self.body.setContentsMargins(18, 14, 18, 18)
-        self.body.setSpacing(6)
-        header = make_label(9, theme.CYAN, bold=True)
+        self.setMinimumHeight(230)
+        self.body.setContentsMargins(22, 18, 22, 22)
+        self.body.setSpacing(8)
+        header = make_label(11, theme.CYAN, bold=True)
         header.setText(f"// {title}")
         self.body.addWidget(header)
 
@@ -58,7 +59,7 @@ class Bar(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.percent = 0.0
-        self.setFixedHeight(8)
+        self.setFixedHeight(12)
 
     def set_percent(self, value: float) -> None:
         self.percent = value
@@ -82,9 +83,9 @@ class ClockPanel(Panel):
 
     def __init__(self, parent=None):
         super().__init__("CHRONO", parent)
-        self.time_label = make_label(26, theme.TEXT, bold=True)
-        self.seconds_label = make_label(10, theme.TEXT_DIM)
-        self.date_label = make_label(11, theme.CYAN)
+        self.time_label = make_label(34, theme.TEXT, bold=True)
+        self.seconds_label = make_label(12, theme.TEXT_DIM)
+        self.date_label = make_label(14, theme.CYAN)
         self.body.addWidget(self.time_label)
         self.body.addWidget(self.seconds_label)
         self.body.addSpacing(6)
@@ -107,14 +108,16 @@ class SystemPanel(Panel):
 
     def __init__(self, parent=None):
         super().__init__("SYSTEM", parent)
-        self.cpu_label = make_label(11, theme.TEXT)
+        self.cpu_label = make_label(14, theme.TEXT)
         self.cpu_bar = Bar()
-        self.ram_label = make_label(11, theme.TEXT)
+        self.cpu_detail = make_label(11, theme.TEXT_DIM)
+        self.ram_label = make_label(14, theme.TEXT)
         self.ram_bar = Bar()
-        self.ram_detail = make_label(9, theme.TEXT_DIM)
+        self.ram_detail = make_label(11, theme.TEXT_DIM)
 
         self.body.addWidget(self.cpu_label)
         self.body.addWidget(self.cpu_bar)
+        self.body.addWidget(self.cpu_detail)
         self.body.addSpacing(10)
         self.body.addWidget(self.ram_label)
         self.body.addWidget(self.ram_bar)
@@ -134,6 +137,7 @@ class SystemPanel(Panel):
         ram = psutil.virtual_memory()             # total, used, percent...
         self.cpu_label.setText(f"CPU   {cpu:5.1f}%")
         self.cpu_bar.set_percent(cpu)
+        self.cpu_detail.setText(f"{psutil.cpu_count()} CORES")
         self.ram_label.setText(f"RAM   {ram.percent:5.1f}%")
         self.ram_bar.set_percent(ram.percent)
         gb = 1024 ** 3
