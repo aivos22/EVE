@@ -28,6 +28,7 @@ import wave
 from PySide6.QtCore import QObject, Signal
 
 from ui.eye_state import EyeState
+from voice.microphone import check_microphone
 from voice.stt import SpeechToText
 from voice.tts import TextToSpeech
 
@@ -38,6 +39,8 @@ READY_AHEAD = 3   # how many sentences the maker may get ready before she says t
 # What she says when the brain can't be reached. It's made once at start-up
 # and saved in the phrase cache, so it plays even with no internet.
 OFFLINE_LINE = "I can't reach my systems right now, sir."
+# What she says at start-up if she has no microphone.
+NO_MIC_LINE = "I can't hear you at the moment, sir. Press slash to type to me instead."
 
 
 class BrainError(Exception):
@@ -83,6 +86,8 @@ class VoiceController(QObject):
         self._get_brain = find_brain()
         self.brain = None          # made in _load, once .env has been read
         self._brain_problem = ""   # why the brain couldn't start, if it couldn't
+        self._mic_problem = ""     # why she can't hear, if she can't
+        self._mic_retrying = False # True while re-checking the microphone
         self.status = "loading"    # loading / idle / recording / working / speaking
         self._jobs: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._run_jobs, daemon=True)
@@ -112,6 +117,14 @@ class VoiceController(QObject):
             return
         if self.status == "working":
             return   # still transcribing or thinking about the last thing you said
+        if self.stt is None:
+            # No microphone. Check again in the background (it may have been
+            # plugged in since); until then, typing with / still works.
+            if not self._mic_retrying:
+                self._mic_retrying = True
+                self.log.emit(f"Can't hear: {self._mic_problem}", "VOICE")
+                self._jobs.put(self._retry_hearing)
+            return
         if self.status == "speaking":
             # You talked over her: she stops, and drops the sentences she hadn't said.
             self._cancel.set()
@@ -175,13 +188,46 @@ class VoiceController(QObject):
                 self._back_to_idle()
 
     def _load(self) -> None:
-        self.log.emit("Loading speech models...", "VOICE")
-        self.stt = SpeechToText(on_live_text=lambda text: self.caption.emit("you", text))
-        self.tts = TextToSpeech()
-        self.log.emit(self.tts.describe(), "TTS")
-        for note in self.tts.notes:   # e.g. why ElevenLabs isn't being used
-            self.log.emit(note, "TTS")
-        self._connect_brain()
+        try:
+            # Her voice first: even with no microphone she can still talk
+            # (and you can still type to her).
+            self.tts = TextToSpeech()
+            self.log.emit(self.tts.describe(), "TTS")
+            for note in self.tts.notes:   # e.g. why ElevenLabs isn't being used
+                self.log.emit(note, "TTS")
+            self._load_hearing()
+            self._connect_brain()
+            self._finish_loading()
+        finally:
+            # Whatever happened above, tell the HUD loading is over, so the
+            # eye never gets stuck on BOOTING.
+            self.ready.emit()
+            if self.status == "loading":
+                self._back_to_idle()
+
+    def _load_hearing(self) -> bool:
+        """
+        Check the microphone, then load the speech-to-text models.
+        Returns True if she can hear. If not, she carries on without it.
+        """
+        problem = check_microphone()
+        if problem is None:
+            self.log.emit("Loading speech models...", "VOICE")
+            try:
+                self.stt = SpeechToText(on_live_text=lambda text: self.caption.emit("you", text))
+                self._mic_problem = ""
+                return True
+            except Exception as error:
+                problem = f"speech recognition failed to load ({type(error).__name__})"
+                diary.exception("Speech-to-text failed to load")
+        self.stt = None
+        self._mic_problem = problem
+        self.log.emit(f"Can't hear: {problem}", "VOICE")
+        diary.warning(f"No hearing: {problem}")
+        return False
+
+    def _finish_loading(self) -> None:
+        """Stock phrases, then the "ready" message."""
         if self._get_brain:
             # Make her stock phrases now, while we're probably online, so they're
             # saved in the cache: instant to say, and they work with no internet.
@@ -192,9 +238,23 @@ class VoiceController(QObject):
                 except Exception:
                     pass   # not worth failing start-up over; she'll try again when needed
         mode = "brain connected" if self.brain else "echo mode" if not self._get_brain else "brain offline"
-        self.log.emit(f"Ready, {mode}. Hold Space to talk", "VOICE")
-        self.ready.emit()
-        self._back_to_idle()
+        if self.stt:
+            self.log.emit(f"Ready, {mode}. Hold Space to talk", "VOICE")
+            return
+        # No hearing: say so out loud once, and point to the command bar.
+        self.log.emit(f"Ready, {mode}. Typing only: press /", "VOICE")
+        self.ready.emit()      # the HUD can leave BOOTING before she speaks
+        self._back_to_idle()   # (so typing works even while she's saying this)
+        self._speak([NO_MIC_LINE])   # goes back to idle by itself when done
+
+    def _retry_hearing(self) -> None:
+        """Space pressed with no microphone: look again (maybe it's plugged in now)."""
+        self.log.emit("Checking the microphone again...", "VOICE")
+        if self._load_hearing():
+            self.log.emit("Microphone found. Hold Space to talk", "VOICE")
+        else:
+            self.log.emit("Still no microphone. Press / to type", "VOICE")
+        self._mic_retrying = False
 
     def _connect_brain(self) -> None:
         if not self._get_brain:
