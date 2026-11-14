@@ -7,6 +7,7 @@ programs from time to time.
 """
 
 from ddgs import DDGS
+from ddgs.exceptions import DDGSException
 
 MAX_RESULTS = 5
 TIMEOUT = 8   # seconds
@@ -23,10 +24,25 @@ def search_web(query: str, recent_news: bool = False) -> dict:
         recent_news: True to search recent news articles instead of the whole web.
     """
     search = DDGS(timeout=TIMEOUT)
-    if recent_news:
-        hits = search.news(query, max_results=MAX_RESULTS)
-    else:
-        hits = search.text(query, max_results=MAX_RESULTS, backend="auto")
+    # Search engines sometimes turn programs away for a moment, so we have a
+    # few ways to ask, and try them in order until one gives results.
+    attempts = [lambda: search.news(query, max_results=MAX_RESULTS)] if recent_news else []
+    attempts += [
+        lambda: search.text(query, max_results=MAX_RESULTS, backend="auto"),
+        lambda: search.text(query, max_results=MAX_RESULTS, backend="google"),
+        lambda: search.news(query, max_results=MAX_RESULTS),
+    ]
+    hits, last_error = [], None
+    for attempt in attempts:
+        try:
+            hits = attempt()
+        except DDGSException as error:   # "No results found", blocked, etc.
+            last_error = error
+            continue
+        if hits:
+            break
+    if not hits and last_error:
+        raise last_error   # every way failed; run_tool turns this into an error note
     results = []
     for hit in hits:
         result = {"title": hit.get("title", ""), "snippet": hit.get("body", "")[:SNIPPET_CHARS]}

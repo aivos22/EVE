@@ -20,6 +20,9 @@ still being made into audio.
 The conversation is capped at MAX_EXCHANGES back-and-forths, so it never
 grows forever (and each request stays quick and cheap).
 
+She can also use tools from the actions/ folder (weather, Wikipedia, web
+search). Gemini decides when a question needs one; see _text_pieces().
+
 This file knows nothing about the HUD or the voice. It just turns text
 into a reply, so it can be tested on its own:  .venv\\Scripts\\python -m brain
 """
@@ -47,6 +50,15 @@ CONNECTION_ERRORS = tuple(lib.TransportError for lib in _WEB_LIBS)  # couldn't c
 WEB_ERRORS = tuple(lib.HTTPError for lib in _WEB_LIBS)              # any of the above, and more
 
 PERSONALITY_FILE = Path(__file__).parent / "personality.txt"
+
+# Her tools (weather, Wikipedia, web search) live in the actions/ folder.
+# If that folder is missing or broken, she just works without them.
+try:
+    from actions import TOOLS, run_tool
+    from actions import describe as describe_tool
+except ImportError:
+    TOOLS = []
+MAX_TOOL_ROUNDS = 3   # at most this many look-ups before she must answer
 
 
 @dataclass
@@ -118,6 +130,10 @@ class Brain:
         # Something to call with short notes for the log (e.g. "think model busy").
         # The voice controller swaps this for its own log; on its own, we just print.
         self.on_note = print
+        # Called with e.g. "Checking weather: Leeds" when a tool starts, and
+        # with None when the tools are done. The voice uses it for the log and
+        # the eye's LOOKING state. On its own, we print it.
+        self.on_tool = lambda text: text and print(f"       ({text})")
 
     # --- Modes ----------------------------------------------------------
 
@@ -180,27 +196,72 @@ class Brain:
 
     def _sentences(self, message: types.Content, mode: Mode):
         """Ask Gemini, and yield the reply as clean, speakable sentences."""
-        config = types.GenerateContentConfig(
-            system_instruction=self.personality + situation(),
-            max_output_tokens=MAX_REPLY_TOKENS,
-            thinking_config=types.ThinkingConfig(thinking_level=mode.thinking),
-            http_options=types.HttpOptions(timeout=mode.timeout * 1000),   # milliseconds
-        )
-        contents = self.history + [message]
-        if mode.stream:
-            # The reply arrives in "chunks" of a few words each.
-            chunks = self.client.models.generate_content_stream(
-                model=mode.model, contents=contents, config=config)
-            pieces = (chunk.text or "" for chunk in chunks)
-        else:
-            # Wait for the whole reply, then treat it as a single chunk.
-            response = self.client.models.generate_content(
-                model=mode.model, contents=contents, config=config)
-            pieces = [response.text or ""]
-        for sentence in split_sentences(pieces):
+        for sentence in split_sentences(self._text_pieces(message, mode)):
             sentence = clean_for_speech(sentence)
             if sentence:
                 yield sentence
+
+    def _text_pieces(self, message: types.Content, mode: Mode):
+        """
+        Ask Gemini and yield her reply as it arrives, a few words at a time.
+
+        If Gemini asks to use a tool instead of answering ("run get_weather
+        for Leeds"), we run it, send back the result, and ask again. That's
+        one "round". Usually there are 0 or 1 rounds before she answers.
+        """
+        # This list grows during the rounds: the tool requests and results are
+        # added to it. They're NOT saved in her long-term history, which only
+        # keeps what you said and what she said, so it stays small.
+        contents = self.history + [message]
+        for round_number in range(MAX_TOOL_ROUNDS + 1):
+            # On the last round, don't offer tools, so she has to answer.
+            offer_tools = bool(TOOLS) and round_number < MAX_TOOL_ROUNDS
+            config = types.GenerateContentConfig(
+                system_instruction=self.personality + situation(),
+                max_output_tokens=MAX_REPLY_TOKENS,
+                thinking_config=types.ThinkingConfig(thinking_level=mode.thinking),
+                http_options=types.HttpOptions(timeout=mode.timeout * 1000),   # milliseconds
+                # Hand Gemini our Python functions; it reads their docstrings to
+                # know what each does. "disable" means it asks US to run them,
+                # rather than the library running them quietly, so we can log it.
+                tools=TOOLS if offer_tools else None,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+            )
+
+            reply_parts = []   # everything Gemini sent this round
+            if mode.stream:
+                # The reply arrives in "chunks" of a few words each.
+                chunks = self.client.models.generate_content_stream(
+                    model=mode.model, contents=contents, config=config)
+            else:
+                # Wait for the whole reply, then treat it as a single chunk.
+                chunks = [self.client.models.generate_content(
+                    model=mode.model, contents=contents, config=config)]
+            for chunk in chunks:
+                parts = (chunk.candidates and chunk.candidates[0].content
+                         and chunk.candidates[0].content.parts) or []
+                for part in parts:
+                    reply_parts.append(part)
+                    if part.text and not part.thought:   # (skip her hidden "thinking")
+                        yield part.text
+
+            tool_requests = [part.function_call for part in reply_parts if part.function_call]
+            if not tool_requests:
+                return   # a normal answer: we're done
+
+            # Run each tool she asked for, and add the results to the conversation.
+            # We send back Gemini's own request parts unchanged: they carry a
+            # "thought signature" that Gemini needs to see again.
+            contents.append(types.Content(role="model", parts=reply_parts))
+            results = []
+            for request in tool_requests:
+                args = dict(request.args or {})
+                self.on_tool(describe_tool(request.name, args))
+                result = run_tool(request.name, args)
+                results.append(types.Part(function_response=types.FunctionResponse(
+                    id=request.id, name=request.name, response=result)))
+            self.on_tool(None)   # tools finished, back to thinking
+            contents.append(types.Content(role="user", parts=results))
 
     def _remember(self, message: types.Content, reply: str) -> None:
         self.history.append(message)

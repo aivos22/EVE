@@ -167,8 +167,24 @@ class VoiceController(QObject):
             self.log.emit(f"Brain off: {error}", "BRAIN")
             return
         self.brain.on_note = lambda note: self.log.emit(note, "BRAIN")
+        self.brain.on_tool = self._tool_update
         self.log.emit(self.brain.describe() + ". M to switch", "BRAIN")
         self.mode_changed.emit(self.brain.mode.upper())
+
+    def _tool_update(self, text: str | None) -> None:
+        """
+        The brain calls this when it starts using a tool ("Checking weather:
+        Leeds") and with None when it's done. The eye looks around while
+        she's looking something up, then goes back to thinking.
+        (Runs on the maker thread; signals carry it safely to the HUD.)
+        """
+        if self._cancel.is_set():
+            return   # you've interrupted; don't change the eye back
+        if text:
+            self.log.emit(text, "ACTION")
+            self.state.emit(EyeState.LOOKING)
+        else:
+            self.state.emit(EyeState.THINKING)
 
     def _handle_speech(self) -> None:
         text = self.stt.stop_and_transcribe()
@@ -233,7 +249,9 @@ class VoiceController(QObject):
             if not spoken:            # first sentence: she starts talking
                 self.log.emit(f"Speaking ({source})", "TTS")
                 self.status = "speaking"
-                self.state.emit(EyeState.SPEAKING)
+            # Every sentence, in case a look-up between sentences changed the eye.
+            # (Setting the state it's already in does nothing.)
+            self.state.emit(EyeState.SPEAKING)
             spoken.append(sentence)
             self.caption.emit("eve", " ".join(spoken))
             # on_level gets her loudness for every little chunk of audio: that's the pulse.
