@@ -7,7 +7,9 @@ EyeAnimator and the log lines in EventLog. Both are passed in, so other
 code (voice, AI) can hold the same objects and drive the HUD.
 """
 
-from PySide6.QtCore import QPoint, QPropertyAnimation, QRectF, Qt, QTimer
+from html import escape
+
+from PySide6.QtCore import QPoint, QPropertyAnimation, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
@@ -30,6 +32,10 @@ STATE_MESSAGES = {
 
 
 class HudWindow(QWidget):
+    # Push-to-talk. The window only reports the key; voice code decides what to do.
+    talk_pressed = Signal()
+    talk_released = Signal()
+
     def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None):
         super().__init__()
         # Use the animator and log we were given, or make our own for testing.
@@ -37,6 +43,8 @@ class HudWindow(QWidget):
         self.event_log = event_log or EventLog(self)
         self._drag_offset: QPoint | None = None
         self._booted = False
+        self._you_said = ""   # caption text
+        self._eve_said = ""
         self.boot = BootSequence(self.animator, self.event_log, self)
         self.shutdown_sequence = ShutdownSequence(self.animator, self.event_log, self)
         self.shutdown_sequence.finished.connect(self._fade_out)
@@ -46,7 +54,6 @@ class HudWindow(QWidget):
         self.animator.state_changed.connect(self._show_state)
         self._show_state(self.animator.state)
         self.event_log.text_changed.connect(self.log_label.setText)
-        self.animator.state_changed.connect(self._log_state)
 
         # Mouse-follow: 30 times a second, tell the animator where the mouse is.
         self._gaze_timer = QTimer(self)
@@ -76,6 +83,14 @@ class HudWindow(QWidget):
         self.status_label.setFont(theme.font(12, bold=True))
         self.status_label.setStyleSheet(f"color: {theme.CYAN.name()}; background: transparent;")
 
+        # Caption: what you said, then E.V.E.'s reply underneath.
+        self.caption_label = QLabel()
+        self.caption_label.setAlignment(Qt.AlignCenter)
+        self.caption_label.setWordWrap(True)
+        self.caption_label.setFont(theme.font(12))
+        self.caption_label.setFixedHeight(56)
+        self.caption_label.setStyleSheet("background: transparent;")
+
         # The log feed: boot lines first, then E.V.E.'s live activity.
         # Fixed height (5 lines) so nothing jumps around as lines come and go.
         self.log_label = QLabel()
@@ -86,6 +101,7 @@ class HudWindow(QWidget):
 
         centre = QVBoxLayout()
         centre.addWidget(self.eye, stretch=1)
+        centre.addWidget(self.caption_label)
         centre.addWidget(self.log_label)
         centre.addWidget(self.status_label)
 
@@ -152,6 +168,26 @@ class HudWindow(QWidget):
             f'<span style="color:{theme.TEXT_DIM.name()}">STATUS //</span> '
             f'<span style="color:{colour.name()}">{word}</span>')
 
+    def show_caption(self, who: str, text: str) -> None:
+        """
+        Show a caption under the eye: your words on one line, her reply below.
+        `who` is "you" or "eve". When you start talking again, her old reply clears.
+        """
+        if who == "you":
+            self._you_said = text
+            self._eve_said = ""
+        else:
+            self._eve_said = text
+        lines = []
+        if self._you_said:
+            # escape() stops symbols like < in what you said being read as HTML.
+            lines.append(f'<span style="color:{theme.TEXT_DIM.name()}"><b>YOU &rsaquo;</b> '
+                         f'{escape(self._you_said)}</span>')
+        if self._eve_said:
+            lines.append(f'<span style="color:{theme.CYAN.name()}"><b>E.V.E. &rsaquo;</b> '
+                         f'{escape(self._eve_said)}</span>')
+        self.caption_label.setText("<br>".join(lines))
+
     def shutdown(self) -> None:
         """Play the shutdown animation, then fade out and quit."""
         self.boot.running = False   # in case we're shut down mid-boot
@@ -175,7 +211,8 @@ class HudWindow(QWidget):
         self.animator.set_gaze(offset.x() / reach, offset.y() / reach)
 
     def _log_state(self, state: EyeState) -> None:
-        """Write a line in the feed whenever the state changes (not during boot)."""
+        """Write a line in the feed for a state picked with the test keys 1-5.
+        (Real state changes from the voice write their own [VOICE] lines.)"""
         if state in STATE_MESSAGES and not self.boot.running:
             self.event_log.log(STATE_MESSAGES[state])
 
@@ -202,13 +239,23 @@ class HudWindow(QWidget):
     def keyPressEvent(self, event):
         if self.shutdown_sequence.running:
             return   # ignore keys once we're shutting down
+        if event.key() == Qt.Key_Space:
+            # Holding a key makes Windows repeat it; only react to the first press.
+            if not event.isAutoRepeat():
+                self.talk_pressed.emit()
+            return
         key = event.text().lower()
         if key in STATE_KEYS:
             self.animator.set_state(STATE_KEYS[key])
+            self._log_state(STATE_KEYS[key])
         elif key == "b":
             self.boot.start()  # replay the whole startup, text and all
         elif event.key() == Qt.Key_Escape:
             self.shutdown()
+
+    def keyReleaseEvent(self, event):
+        if event.key() == Qt.Key_Space and not event.isAutoRepeat():
+            self.talk_released.emit()
 
     # --- Mouse: drag anywhere to move the window ------------------------
     # With no title bar, we handle moving ourselves: remember where the

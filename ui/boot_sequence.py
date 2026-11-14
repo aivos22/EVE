@@ -29,6 +29,9 @@ class BootSequence(QObject):
         self.animator = animator
         self.event_log = event_log
         self.running = False
+        # If True, the eye stays in BOOTING after the text finishes, and
+        # whoever set this (main.py, waiting for the voice) switches it to IDLE.
+        self.wait_for_ready = False
         # When the log has typed everything, the boot is over.
         event_log.queue_empty.connect(self._on_log_done)
 
@@ -47,7 +50,8 @@ class BootSequence(QObject):
     def _on_log_done(self) -> None:
         if self.running:
             self.running = False
-            self.animator.set_state(EyeState.IDLE)
+            if not self.wait_for_ready:
+                self.animator.set_state(EyeState.IDLE)
             self.finished.emit()
 
 
