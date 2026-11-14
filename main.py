@@ -32,6 +32,8 @@ def main():
     window.talk_released.connect(voice.talk_released)
     # Window -> voice: M switches the brain between fast and think mode.
     window.mode_toggle_pressed.connect(voice.toggle_mode)
+    # Window -> voice: a message typed in the command bar (/ key).
+    window.text_submitted.connect(voice.typed)
     # Voice -> window: log lines, captions and the brain's mode.
     voice.log.connect(lambda message, source: event_log.log(message, source))
     voice.caption.connect(window.show_caption)

@@ -15,6 +15,7 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWi
 
 from ui import theme
 from ui.boot_sequence import BootSequence, ShutdownSequence
+from ui.command_box import CommandBox
 from ui.event_log import EventLog
 from ui.eye_animator import EyeAnimator
 from ui.eye_state import STATE_KEYS, EyeState
@@ -37,6 +38,7 @@ class HudWindow(QWidget):
     talk_pressed = Signal()
     talk_released = Signal()
     mode_toggle_pressed = Signal()   # M key: switch the brain between fast and think
+    text_submitted = Signal(str)     # a message typed in the command bar (/ key)
 
     def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None):
         super().__init__()
@@ -98,6 +100,11 @@ class HudWindow(QWidget):
         self.caption_label.setFixedHeight(56)
         self.caption_label.setStyleSheet("background: transparent;")
 
+        # The typed command bar, hidden until you press /.
+        self.command_box = CommandBox()
+        self.command_box.submitted.connect(self.text_submitted)   # pass the message on
+        self.command_box.closed.connect(self.setFocus)            # keys go back to the window
+
         # The log feed: boot lines first, then E.V.E.'s live activity.
         # Fixed height (5 lines) so nothing jumps around as lines come and go.
         self.log_label = QLabel()
@@ -109,6 +116,7 @@ class HudWindow(QWidget):
         centre = QVBoxLayout()
         centre.addWidget(self.eye, stretch=1)
         centre.addWidget(self.caption_label)
+        centre.addWidget(self.command_box)
         centre.addWidget(self.log_label)
         centre.addWidget(self.status_label)
 
@@ -284,6 +292,8 @@ class HudWindow(QWidget):
             self.boot.start()  # replay the whole startup, text and all
         elif key == "m":
             self.mode_toggle_pressed.emit()
+        elif key == "/":
+            self.command_box.open()   # from now, typing goes into the box
         elif event.key() == Qt.Key_Escape:
             self.shutdown()
 

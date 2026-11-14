@@ -125,6 +125,27 @@ class VoiceController(QObject):
         self.state.emit(EyeState.THINKING)
         self._jobs.put(self._handle_speech)
 
+    def typed(self, text: str) -> None:
+        """
+        A message from the typed command bar. From here it goes down exactly
+        the same path as speech (think, then speak), just without the microphone.
+        """
+        if self.status == "loading":
+            self.log.emit("Still loading, one moment...", "VOICE")
+            return
+        if self.status in ("working", "recording"):
+            self.log.emit("Busy, try again in a moment", "VOICE")
+            return
+        if self.status == "speaking":
+            self._cancel.set()   # a new message interrupts her, like talking over her
+            self.tts.stop()
+        self.status = "working"
+        self.state.emit(EyeState.THINKING)
+        self.caption.emit("you", text)
+        self.log.emit(f"Typed: {text}", "TEXT")
+        # Run on the background thread, like everything slow.
+        self._jobs.put(lambda: self._reply_to(text))
+
     def toggle_mode(self) -> None:
         """Switch the brain between fast mode and think mode."""
         if not self.brain:
