@@ -19,6 +19,7 @@ Each fact has a number, so she can update or forget a specific one:
 
 import json
 import os
+import shutil
 import threading
 from datetime import date
 
@@ -86,9 +87,15 @@ class LongTermMemory:
             return {"forgotten": number, "fact": fact["fact"]}
 
     def forget_everything(self) -> int:
-        """Remove every fact. Returns how many there were."""
+        """
+        Remove every fact. Returns how many there were. A copy of the old
+        file is kept as memory.backup.json, in case it was a mistake: to undo,
+        rename it back to memory.json while E.V.E. is closed.
+        """
         with self._lock:
             count = len(self.facts)
+            if self.path.exists():
+                shutil.copyfile(self.path, self.path.with_suffix(".backup.json"))
             self.facts = []
             self._save()
             return count
