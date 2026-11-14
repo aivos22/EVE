@@ -27,6 +27,7 @@ into a reply, so it can be tested on its own:  .venv\\Scripts\\python -m brain
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from google import genai
@@ -180,7 +181,7 @@ class Brain:
     def _sentences(self, message: types.Content, mode: Mode):
         """Ask Gemini, and yield the reply as clean, speakable sentences."""
         config = types.GenerateContentConfig(
-            system_instruction=self.personality,
+            system_instruction=self.personality + situation(),
             max_output_tokens=MAX_REPLY_TOKENS,
             thinking_config=types.ThinkingConfig(thinking_level=mode.thinking),
             http_options=types.HttpOptions(timeout=mode.timeout * 1000),   # milliseconds
@@ -210,6 +211,28 @@ class Brain:
     def forget(self) -> None:
         """Wipe the conversation memory (a fresh start)."""
         self.history.clear()
+
+
+# --- What's going on right now ----------------------------------------------
+
+def situation() -> str:
+    """
+    A few lines added after her personality on EVERY request, so she always
+    knows the current date and time (Gemini has no clock of its own) and
+    where sir lives. Made fresh each time, so the time is always right.
+    """
+    now = datetime.now().astimezone()   # this PC's local time and time zone
+    hour = now.strftime("%I").lstrip("0")   # "03" -> "3"
+    lines = [
+        "",
+        "",
+        f"Right now it is {now:%A} {now.day} {now:%B %Y}, {hour}:{now:%M} {now:%p}".replace("AM", "am").replace("PM", "pm")
+        + f" (time zone {now:%Z}).",
+    ]
+    home = os.getenv("EVE_HOME_CITY", "").strip()
+    if home:
+        lines.append(f"Sir lives in {home}. Assume he means there unless he says otherwise.")
+    return "\n".join(lines)
 
 
 # --- Text helpers -----------------------------------------------------------
