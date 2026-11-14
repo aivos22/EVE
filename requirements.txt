@@ -1,6 +1,8 @@
 google-genai
 python-dotenv
 RealtimeSTT
+faster-whisper
+silero-vad
 elevenlabs
 PySide6
 opencv-python
