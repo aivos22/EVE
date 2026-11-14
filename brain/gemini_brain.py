@@ -36,6 +36,8 @@ from pathlib import Path
 from google import genai
 from google.genai import errors, types
 
+from brain.memory import get_memory
+
 # google-genai talks to the internet through a web library: "httpx2" in the
 # version we have, plain "httpx" in older ones. We only need their error
 # types, so we collect them from whichever is installed.
@@ -134,6 +136,8 @@ class Brain:
         # with None when the tools are done. The voice uses it for the log and
         # the eye's LOOKING state. On its own, we print it.
         self.on_tool = lambda text: text and print(f"       ({text})")
+        # True after she's asked "forget everything about you, are you sure?"
+        self._wipe_pending = False
 
     # --- Modes ----------------------------------------------------------
 
@@ -161,6 +165,35 @@ class Brain:
         sentence as soon as it's ready, and whoever is looping over it gets
         that sentence straight away.
         """
+        # "Start fresh" / "forget that": wipe her memory instead of asking
+        # Gemini. Instant, works offline, and isn't itself remembered.
+        if wants_fresh_start(text):
+            remembered = len(self.history) // 2
+            self.forget()
+            self.on_note(f"Memory cleared ({remembered} exchanges forgotten)")
+            yield FRESH_START_REPLY
+            return
+
+        # "Forget everything about me": ask first, then wipe on a "yes".
+        if self._wipe_pending:
+            self._wipe_pending = False
+            if is_yes(text):
+                count = get_memory().forget_everything()   # (a backup copy is kept)
+                self.on_note(f"Long-term memory wiped ({count} facts, backup in data/memory.backup.json)")
+                yield "Done, sir. I've forgotten everything I knew about you."
+                return
+            # Anything else cancels, and is then answered as a normal message.
+            self.on_note("Memory wipe cancelled")
+        if wants_memory_wipe(text):
+            count = len(get_memory())
+            if count == 0:
+                yield "There's nothing to forget, sir. I haven't saved anything about you yet."
+                return
+            self._wipe_pending = True
+            facts = "one thing" if count == 1 else f"all {count} things"
+            yield f"Just to be sure, sir: that erases {facts} I remember about you. Say yes to confirm."
+            return
+
         message = types.Content(role="user", parts=[types.Part(text=text)])
         said = []   # every sentence handed out, to remember at the end
         try:
@@ -213,11 +246,15 @@ class Brain:
         # added to it. They're NOT saved in her long-term history, which only
         # keeps what you said and what she said, so it stays small.
         contents = self.history + [message]
+        # Her instructions (personality + date + memory) are made ONCE per
+        # question. If she saves a fact mid-answer, she shouldn't then see it
+        # in her memory and think she "already knew" it.
+        instructions = self.personality + situation()
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # On the last round, don't offer tools, so she has to answer.
             offer_tools = bool(TOOLS) and round_number < MAX_TOOL_ROUNDS
             config = types.GenerateContentConfig(
-                system_instruction=self.personality + situation(),
+                system_instruction=instructions,
                 max_output_tokens=MAX_REPLY_TOKENS,
                 thinking_config=types.ThinkingConfig(thinking_level=mode.thinking),
                 http_options=types.HttpOptions(timeout=mode.timeout * 1000),   # milliseconds
@@ -274,13 +311,72 @@ class Brain:
         self.history.clear()
 
 
+# --- "Start fresh" ----------------------------------------------------------
+
+# Say (or type) any of these on its own, and she forgets the conversation so far.
+# Add your own here; write them in lower case, without punctuation.
+FRESH_START_PHRASES = {
+    "start fresh", "start afresh", "fresh start", "start over", "start again",
+    "forget that", "forget it", "forget everything", "forget all that",
+    "clear your memory", "wipe your memory", "reset your memory",
+    "new conversation", "new topic", "clean slate",
+}
+FRESH_START_REPLY = "Clean slate, sir."
+# Polite or extra words that may come before/after, e.g. "Eve, please start fresh".
+FILLER_WORDS = {"eve", "hey", "ok", "okay", "please", "can", "you", "could", "lets", "let's", "now", "just"}
+
+
+def command_words(text: str) -> str:
+    """
+    Boil a message down for matching commands: lower case, no punctuation,
+    polite words trimmed off both ends. "Eve, start fresh please!" -> "start fresh"
+    """
+    words = re.sub(r"[^a-z' ]", " ", text.lower()).split()   # lower case, no punctuation
+    # Trim polite words off both ends (not the middle).
+    while words and words[0] in FILLER_WORDS:
+        words.pop(0)
+    while words and words[-1] in FILLER_WORDS:
+        words.pop()
+    return " ".join(words)
+
+
+def wants_fresh_start(text: str) -> bool:
+    """
+    True if `text` is just a "start fresh" command, like "Start fresh." or
+    "Eve, forget that please". Only the WHOLE message counts, so "forget that
+    I'm vegetarian, I'm not" is treated as a normal message, not a reset.
+    """
+    return command_words(text) in FRESH_START_PHRASES
+
+
+# "Forget everything about me": wipes her LONG-TERM memory (data/memory.json),
+# not just the conversation. Because that's hard to undo, she asks first.
+MEMORY_WIPE_PHRASES = {
+    "forget everything about me", "forget everything you know about me",
+    "forget all about me", "forget all you know about me", "forget me",
+    "wipe your memory of me", "erase your memory of me", "erase everything about me",
+    "delete everything you know about me", "delete everything about me",
+    "clear your long term memory", "wipe your long term memory",
+}
+YES_WORDS = {"yes", "yes forget everything", "yes do it", "yes i'm sure", "yes im sure",
+             "confirm", "confirmed", "do it", "i'm sure", "im sure", "yep", "yeah"}
+
+
+def wants_memory_wipe(text: str) -> bool:
+    return command_words(text) in MEMORY_WIPE_PHRASES
+
+
+def is_yes(text: str) -> bool:
+    return command_words(text) in YES_WORDS
+
+
 # --- What's going on right now ----------------------------------------------
 
 def situation() -> str:
     """
     A few lines added after her personality on EVERY request, so she always
-    knows the current date and time (Gemini has no clock of its own) and
-    where sir lives. Made fresh each time, so the time is always right.
+    knows the current date and time (Gemini has no clock of its own), where
+    sir lives, and what she remembers about him. Made fresh each time.
     """
     now = datetime.now().astimezone()   # this PC's local time and time zone
     hour = now.strftime("%I").lstrip("0")   # "03" -> "3"
@@ -293,6 +389,13 @@ def situation() -> str:
     home = os.getenv("EVE_HOME_CITY", "").strip()
     if home:
         lines.append(f"Sir lives in {home}. Assume he means there unless he says otherwise.")
+
+    # Her long-term memory (data/memory.json), read fresh every time, so a
+    # fact saved a moment ago is already known in the very next answer.
+    facts = get_memory().as_text()
+    lines.append("")
+    lines.append("What you remember about sir from earlier conversations (your long-term memory, numbered):")
+    lines.append(facts or "(nothing yet)")
     return "\n".join(lines)
 
 

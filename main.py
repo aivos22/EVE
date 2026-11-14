@@ -4,6 +4,7 @@ import sys
 from dotenv import load_dotenv
 from PySide6.QtWidgets import QApplication
 
+from log_file import log_line, start_log_file
 from paths import BASE_DIR
 from ui.event_log import EventLog
 from ui.eye_animator import EyeAnimator
@@ -15,9 +16,11 @@ load_dotenv(BASE_DIR / ".env")
 
 def main():
     app = QApplication(sys.argv)
+    diary = start_log_file()   # data/logs/eve_<today>.txt
 
     key_ok = "yes" if os.getenv("GEMINI_API_KEY") else "NO"
-    print(f"E.V.E. starting. Gemini key loaded: {key_ok}")
+    print(f"E.V.E. starting. Gemini key loaded: {key_ok}. Diary: {diary}")
+    log_line(f"Gemini key loaded: {key_ok}")
 
     # The animator and log are created here, not inside the window, so the
     # voice and brain code can be handed the same objects and drive the HUD.
@@ -36,6 +39,7 @@ def main():
     window.text_submitted.connect(voice.typed)
     # Voice -> window: log lines, captions and the brain's mode.
     voice.log.connect(lambda message, source: event_log.log(message, source))
+    voice.log.connect(log_line)   # ...and every log line also goes in the diary file
     voice.caption.connect(window.show_caption)
     voice.subtitle.connect(window.show_subtitle)   # her sentences, typewriter-style
     voice.mode_changed.connect(window.show_mode)
@@ -51,6 +55,7 @@ def main():
     window.boot.finished.connect(voice.start)
     # Free the microphone when the program closes.
     app.aboutToQuit.connect(voice.shutdown)
+    app.aboutToQuit.connect(lambda: log_line("=== E.V.E. closed ==="))
 
     window.show()
     sys.exit(app.exec())
