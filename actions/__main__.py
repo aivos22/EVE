@@ -6,6 +6,7 @@ Try one of E.V.E.'s tools on its own, with no brain, HUD or voice.
     .venv\\Scripts\\python -m actions wiki Ada Lovelace
     .venv\\Scripts\\python -m actions search best pizza in Rome
     .venv\\Scripts\\python -m actions news Formula 1
+    .venv\\Scripts\\python -m actions open_app spotify
 
 It prints exactly what Gemini will be handed.
 """
@@ -27,6 +28,7 @@ SHORTCUTS = {
     "wiki": ("look_up_wikipedia", "topic", {}),
     "search": ("search_web", "query", {}),
     "news": ("search_web", "query", {"recent_news": True}),
+    "open_app": ("open_app", "name", {}),
 }
 
 if len(sys.argv) < 2 or sys.argv[1] not in SHORTCUTS:
