@@ -35,6 +35,7 @@ def main():
     # Voice -> window: log lines, captions and the brain's mode.
     voice.log.connect(lambda message, source: event_log.log(message, source))
     voice.caption.connect(window.show_caption)
+    voice.subtitle.connect(window.show_subtitle)   # her sentences, typewriter-style
     voice.mode_changed.connect(window.show_mode)
     # Voice -> eye: listening / thinking / speaking / idle, and the speaking pulse.
     voice.state.connect(animator.set_state)

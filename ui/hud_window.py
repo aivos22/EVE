@@ -20,6 +20,7 @@ from ui.eye_animator import EyeAnimator
 from ui.eye_state import STATE_KEYS, EyeState
 from ui.eye_widget import EyeWidget
 from ui.side_panel import ClockPanel, SystemPanel
+from ui.typewriter import Typewriter
 
 # What the log feed says when E.V.E. enters each state.
 STATE_MESSAGES = {
@@ -45,9 +46,13 @@ class HudWindow(QWidget):
         self._drag_offset: QPoint | None = None
         self._booted = False
         self._you_said = ""   # caption text
-        self._eve_said = ""
+        self._eve_said = ""   # as much of her sentence as has been typed so far
+        self._eve_rest = ""   # the part not typed yet (drawn invisibly, to hold its place)
         self._mode = ""       # the brain's mode, shown after the status, e.g. "FAST"
-        self.boot =BootSequence(self.animator, self.event_log, self)
+        # Types her sentences out letter by letter (see ui/typewriter.py).
+        self.typewriter = Typewriter(self)
+        self.typewriter.text_changed.connect(self._on_typed)
+        self.boot = BootSequence(self.animator, self.event_log, self)
         self.shutdown_sequence = ShutdownSequence(self.animator, self.event_log, self)
         self.shutdown_sequence.finished.connect(self._fade_out)
 
@@ -184,17 +189,35 @@ class HudWindow(QWidget):
         """
         if who == "you":
             self._you_said = text
-            self._eve_said = ""
+            self.typewriter.clear()   # also clears her line, through _on_typed
         else:
-            self._eve_said = text
+            self.typewriter.type(text, 0.0)
+
+    def show_subtitle(self, sentence: str, seconds: float) -> None:
+        """Type out the sentence she's saying, spread over `seconds`."""
+        self.typewriter.type(sentence, seconds)
+
+    def _on_typed(self, shown: str, rest: str) -> None:
+        """The typewriter has shown a few more letters: redraw the caption."""
+        self._eve_said = shown
+        self._eve_rest = rest
+        self._draw_caption()
+
+    def _draw_caption(self) -> None:
         lines = []
         if self._you_said:
             # escape() stops symbols like < in what you said being read as HTML.
             lines.append(f'<span style="color:{theme.TEXT_DIM.name()}"><b>YOU &rsaquo;</b> '
                          f'{escape(self._you_said)}</span>')
-        if self._eve_said:
+        if self._eve_said or self._eve_rest:
+            # While she's still "typing": a block cursor, then the rest of the
+            # sentence in transparent ink (it takes up space but can't be seen).
+            typing = ""
+            if self._eve_rest:
+                typing = (f'<span style="color:{theme.CYAN.name()}">&#9612;</span>'
+                          f'<span style="color:transparent">{escape(self._eve_rest[1:])}</span>')
             lines.append(f'<span style="color:{theme.CYAN.name()}"><b>E.V.E. &rsaquo;</b> '
-                         f'{escape(self._eve_said)}</span>')
+                         f'{escape(self._eve_said)}</span>{typing}')
         self.caption_label.setText("<br>".join(lines))
 
     def shutdown(self) -> None:

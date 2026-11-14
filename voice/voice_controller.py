@@ -22,6 +22,7 @@ sends out signals, and main.py connects those to the HUD.
 
 import queue
 import threading
+import wave
 
 from PySide6.QtCore import QObject, Signal
 
@@ -37,6 +38,15 @@ OFFLINE_LINE = "I can't reach my systems right now, sir."
 
 class BrainError(Exception):
     """Stand-in used only when there's no brain/ folder (so nothing can raise it)."""
+
+
+def audio_seconds(wav_path) -> float:
+    """How long a .wav file lasts, in seconds (0 if it can't be read)."""
+    try:
+        with wave.open(str(wav_path)) as wav:
+            return wav.getnframes() / wav.getframerate()
+    except (OSError, wave.Error):
+        return 0.0
 
 
 def find_brain():
@@ -56,6 +66,7 @@ class VoiceController(QObject):
     # Signals: Qt safely carries these from the background thread to the window.
     log = Signal(str, str)     # (message, source), e.g. ("Heard: hi", "VOICE")
     caption = Signal(str, str) # (who, text): who is "you" or "eve"; empty text clears it
+    subtitle = Signal(str, float)  # (sentence, seconds): her sentence, typed out over that long
     ready = Signal()           # models loaded, Space will work now
     state = Signal(EyeState)   # what the eye should be doing
     level = Signal(float)      # her voice loudness 0-1, many times a second while speaking
@@ -253,7 +264,9 @@ class VoiceController(QObject):
             # (Setting the state it's already in does nothing.)
             self.state.emit(EyeState.SPEAKING)
             spoken.append(sentence)
-            self.caption.emit("eve", " ".join(spoken))
+            # Type the sentence out while she says it. It finishes a little
+            # before the audio does (90%), which reads more naturally.
+            self.subtitle.emit(sentence, 0.9 * audio_seconds(audio_path))
             # on_level gets her loudness for every little chunk of audio: that's the pulse.
             self.tts.play(audio_path, on_level=self.level.emit)
 
