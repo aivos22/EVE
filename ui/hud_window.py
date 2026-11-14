@@ -15,11 +15,13 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWi
 
 from ui import theme
 from ui.boot_sequence import BootSequence, ShutdownSequence
+from ui.command_box import CommandBox
 from ui.event_log import EventLog
 from ui.eye_animator import EyeAnimator
 from ui.eye_state import STATE_KEYS, EyeState
 from ui.eye_widget import EyeWidget
 from ui.side_panel import ClockPanel, SystemPanel
+from ui.typewriter import Typewriter
 
 # What the log feed says when E.V.E. enters each state.
 STATE_MESSAGES = {
@@ -35,6 +37,8 @@ class HudWindow(QWidget):
     # Push-to-talk. The window only reports the key; voice code decides what to do.
     talk_pressed = Signal()
     talk_released = Signal()
+    mode_toggle_pressed = Signal()   # M key: switch the brain between fast and think
+    text_submitted = Signal(str)     # a message typed in the command bar (/ key)
 
     def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None):
         super().__init__()
@@ -44,7 +48,12 @@ class HudWindow(QWidget):
         self._drag_offset: QPoint | None = None
         self._booted = False
         self._you_said = ""   # caption text
-        self._eve_said = ""
+        self._eve_said = ""   # as much of her sentence as has been typed so far
+        self._eve_rest = ""   # the part not typed yet (drawn invisibly, to hold its place)
+        self._mode = ""       # the brain's mode, shown after the status, e.g. "FAST"
+        # Types her sentences out letter by letter (see ui/typewriter.py).
+        self.typewriter = Typewriter(self)
+        self.typewriter.text_changed.connect(self._on_typed)
         self.boot = BootSequence(self.animator, self.event_log, self)
         self.shutdown_sequence = ShutdownSequence(self.animator, self.event_log, self)
         self.shutdown_sequence.finished.connect(self._fade_out)
@@ -91,6 +100,11 @@ class HudWindow(QWidget):
         self.caption_label.setFixedHeight(56)
         self.caption_label.setStyleSheet("background: transparent;")
 
+        # The typed command bar, hidden until you press /.
+        self.command_box = CommandBox()
+        self.command_box.submitted.connect(self.text_submitted)   # pass the message on
+        self.command_box.closed.connect(self.setFocus)            # keys go back to the window
+
         # The log feed: boot lines first, then E.V.E.'s live activity.
         # Fixed height (5 lines) so nothing jumps around as lines come and go.
         self.log_label = QLabel()
@@ -102,6 +116,7 @@ class HudWindow(QWidget):
         centre = QVBoxLayout()
         centre.addWidget(self.eye, stretch=1)
         centre.addWidget(self.caption_label)
+        centre.addWidget(self.command_box)
         centre.addWidget(self.log_label)
         centre.addWidget(self.status_label)
 
@@ -164,9 +179,16 @@ class HudWindow(QWidget):
     def _show_state(self, state: EyeState) -> None:
         word, colour = theme.STATE_STYLE[state]
         # Rich text (a tiny bit of HTML) lets one label use two colours.
-        self.status_label.setText(
-            f'<span style="color:{theme.TEXT_DIM.name()}">STATUS //</span> '
-            f'<span style="color:{colour.name()}">{word}</span>')
+        text = (f'<span style="color:{theme.TEXT_DIM.name()}">STATUS //</span> '
+                f'<span style="color:{colour.name()}">{word}</span>')
+        if self._mode:
+            text += f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;MODE // {self._mode}</span>'
+        self.status_label.setText(text)
+
+    def show_mode(self, mode: str) -> None:
+        """Show the brain's mode (e.g. "FAST" or "THINK") next to the status."""
+        self._mode = mode
+        self._show_state(self.animator.state)
 
     def show_caption(self, who: str, text: str) -> None:
         """
@@ -175,17 +197,35 @@ class HudWindow(QWidget):
         """
         if who == "you":
             self._you_said = text
-            self._eve_said = ""
+            self.typewriter.clear()   # also clears her line, through _on_typed
         else:
-            self._eve_said = text
+            self.typewriter.type(text, 0.0)
+
+    def show_subtitle(self, sentence: str, seconds: float) -> None:
+        """Type out the sentence she's saying, spread over `seconds`."""
+        self.typewriter.type(sentence, seconds)
+
+    def _on_typed(self, shown: str, rest: str) -> None:
+        """The typewriter has shown a few more letters: redraw the caption."""
+        self._eve_said = shown
+        self._eve_rest = rest
+        self._draw_caption()
+
+    def _draw_caption(self) -> None:
         lines = []
         if self._you_said:
             # escape() stops symbols like < in what you said being read as HTML.
             lines.append(f'<span style="color:{theme.TEXT_DIM.name()}"><b>YOU &rsaquo;</b> '
                          f'{escape(self._you_said)}</span>')
-        if self._eve_said:
+        if self._eve_said or self._eve_rest:
+            # While she's still "typing": a block cursor, then the rest of the
+            # sentence in transparent ink (it takes up space but can't be seen).
+            typing = ""
+            if self._eve_rest:
+                typing = (f'<span style="color:{theme.CYAN.name()}">&#9612;</span>'
+                          f'<span style="color:transparent">{escape(self._eve_rest[1:])}</span>')
             lines.append(f'<span style="color:{theme.CYAN.name()}"><b>E.V.E. &rsaquo;</b> '
-                         f'{escape(self._eve_said)}</span>')
+                         f'{escape(self._eve_said)}</span>{typing}')
         self.caption_label.setText("<br>".join(lines))
 
     def shutdown(self) -> None:
@@ -250,6 +290,10 @@ class HudWindow(QWidget):
             self._log_state(STATE_KEYS[key])
         elif key == "b":
             self.boot.start()  # replay the whole startup, text and all
+        elif key == "m":
+            self.mode_toggle_pressed.emit()
+        elif key == "/":
+            self.command_box.open()   # from now, typing goes into the box
         elif event.key() == Qt.Key_Escape:
             self.shutdown()
 
