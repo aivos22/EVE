@@ -1,7 +1,11 @@
 google-genai
 python-dotenv
 RealtimeSTT
+faster-whisper
+silero-vad
 elevenlabs
+pyttsx3
+kokoro-onnx
 PySide6
 opencv-python
 Pillow
