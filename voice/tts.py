@@ -96,6 +96,13 @@ class TextToSpeech:
         Get a .wav file of `text` being spoken. Returns (file path, source),
         where source says which voice made it, for the log.
         """
+        # Already saved by ANY of our voices? Use that straight away. (Most
+        # useful offline: no time wasted trying an online voice first.)
+        for engine in self.engines:
+            cached = self._cache_path(engine, text)
+            if cached and cached.exists():
+                return cached, f"{ENGINE_NAMES[engine]}, cached"
+
         problems = []
         for engine in list(self.engines):
             name = ENGINE_NAMES[engine]

@@ -6,7 +6,7 @@ this file is imported. That way, a problem like a missing API key can't
 stop the whole HUD from starting.
 """
 
-from brain.gemini_brain import Brain
+from brain.gemini_brain import Brain, BrainError  # noqa: F401  (BrainError is for other code to catch)
 
 _brain: Brain | None = None
 

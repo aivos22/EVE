@@ -29,9 +29,21 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx   # the web library google-genai uses underneath; we only need its timeout error
 from google import genai
 from google.genai import errors, types
+
+# google-genai talks to the internet through a web library: "httpx2" in the
+# version we have, plain "httpx" in older ones. We only need their error
+# types, so we collect them from whichever is installed.
+import httpx
+try:
+    import httpx2
+except ImportError:
+    httpx2 = None
+_WEB_LIBS = [lib for lib in (httpx, httpx2) if lib]
+TIMEOUT_ERRORS = tuple(lib.TimeoutException for lib in _WEB_LIBS)   # took too long
+CONNECTION_ERRORS = tuple(lib.TransportError for lib in _WEB_LIBS)  # couldn't connect at all
+WEB_ERRORS = tuple(lib.HTTPError for lib in _WEB_LIBS)              # any of the above, and more
 
 PERSONALITY_FILE = Path(__file__).parent / "personality.txt"
 
@@ -63,11 +75,38 @@ MAX_REPLY_TOKENS = 8000
 BUSY_CODES = (429, 500, 503, 504)
 
 
+class BrainError(Exception):
+    """
+    The brain couldn't get a reply. The message is a short, plain reason for
+    the log, e.g. "no internet connection" or "API key not valid".
+    """
+
+
+def explain(error: Exception) -> str:
+    """Turn a technical error into a short, plain reason for the log."""
+    if isinstance(error, TIMEOUT_ERRORS):
+        return "Gemini took too long to answer"
+    if isinstance(error, CONNECTION_ERRORS):
+        return "no internet connection"
+    if isinstance(error, errors.APIError):
+        message = (error.message or "").lower()
+        if "api key" in message or error.code in (401, 403):
+            return "API key not valid (check GEMINI_API_KEY in .env)"
+        if error.code == 429:
+            return "too many requests, or out of free quota"
+        if error.code == 404:
+            return "model not found (check the model names in brain/gemini_brain.py)"
+        if error.code >= 500:
+            return f"Gemini is having problems ({error.code})"
+        return f"Gemini error {error.code}: {error.message}"[:90]
+    return f"{type(error).__name__}: {error}"[:90]
+
+
 class Brain:
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise RuntimeError("No GEMINI_API_KEY in .env")
+            raise BrainError("no GEMINI_API_KEY in .env")
         # The client is our connection to Gemini.
         self.client = genai.Client(api_key=api_key)
         self.personality = PERSONALITY_FILE.read_text(encoding="utf-8")
@@ -112,12 +151,13 @@ class Brain:
                 for sentence in self._sentences(message, MODES[self.mode]):
                     said.append(sentence)
                     yield sentence
-            except (errors.APIError, httpx.TimeoutException) as error:
+            except (errors.APIError, *TIMEOUT_ERRORS) as error:
                 # Think model busy or too slow? Answer with the fast one
                 # instead, if we haven't started speaking yet.
-                busy = isinstance(error, httpx.TimeoutException) or error.code in BUSY_CODES
+                too_slow = isinstance(error, TIMEOUT_ERRORS)
+                busy = too_slow or error.code in BUSY_CODES
                 if self.mode == "think" and busy and not said:
-                    reason = "too slow" if isinstance(error, httpx.TimeoutException) else f"busy, {error.code}"
+                    reason = "too slow" if too_slow else f"busy, {error.code}"
                     self.on_note(f"Think model {reason}: using fast model")
                     for sentence in self._sentences(message, MODES["fast"]):
                         said.append(sentence)
@@ -127,6 +167,10 @@ class Brain:
             if not said:
                 said.append("I'm afraid I drew a blank there, sir.")
                 yield said[-1]
+        except (errors.APIError, *WEB_ERRORS) as error:
+            # Anything that went wrong talking to Gemini becomes one kind of
+            # error with a plain reason, so the voice knows what to do with it.
+            raise BrainError(explain(error)) from error
         finally:
             # "finally" runs however this ends: finished, failed, or cut short
             # because you talked over her. She remembers whatever she said.

@@ -30,6 +30,13 @@ from voice.stt import SpeechToText
 from voice.tts import TextToSpeech
 
 READY_AHEAD = 3   # how many sentences the maker may get ready before she says them
+# What she says when the brain can't be reached. It's made once at start-up
+# and saved in the phrase cache, so it plays even with no internet.
+OFFLINE_LINE = "I can't reach my systems right now, sir."
+
+
+class BrainError(Exception):
+    """Stand-in used only when there's no brain/ folder (so nothing can raise it)."""
 
 
 def find_brain():
@@ -37,8 +44,9 @@ def find_brain():
     Look for the brain/ folder's get_brain() function.
     Returns it if found, or None (which means echo mode).
     """
+    global BrainError
     try:
-        from brain import get_brain
+        from brain import BrainError, get_brain   # noqa: F811  (swap in the real BrainError)
         return get_brain
     except ImportError:
         return None
@@ -59,6 +67,7 @@ class VoiceController(QObject):
         self.tts: TextToSpeech | None = None
         self._get_brain = find_brain()
         self.brain = None          # made in _load, once .env has been read
+        self._brain_problem = ""   # why the brain couldn't start, if it couldn't
         self.status = "loading"    # loading / idle / recording / working / speaking
         self._jobs: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._run_jobs, daemon=True)
@@ -136,7 +145,14 @@ class VoiceController(QObject):
         for note in self.tts.notes:   # e.g. why ElevenLabs isn't being used
             self.log.emit(note, "TTS")
         self._connect_brain()
-        mode = "brain connected" if self.brain else "echo mode"
+        if self._get_brain:
+            # Make her "can't reach my systems" line now, while we're probably
+            # online, so it's saved in the cache and plays even with no internet.
+            try:
+                self.tts.prepare(OFFLINE_LINE)
+            except Exception:
+                pass   # not worth failing start-up over; she'll try again when needed
+        mode = "brain connected" if self.brain else "echo mode" if not self._get_brain else "brain offline"
         self.log.emit(f"Ready, {mode}. Hold Space to talk", "VOICE")
         self.ready.emit()
         self._back_to_idle()
@@ -147,6 +163,7 @@ class VoiceController(QObject):
         try:
             self.brain = self._get_brain()
         except Exception as error:   # e.g. no API key in .env
+            self._brain_problem = str(error)
             self.log.emit(f"Brain off: {error}", "BRAIN")
             return
         self.brain.on_note = lambda note: self.log.emit(note, "BRAIN")
@@ -165,12 +182,35 @@ class VoiceController(QObject):
         self._reply_to(text)
 
     def _reply_to(self, text: str) -> None:
-        """Get the brain's reply and speak it, sentence by sentence."""
+        """Get the brain's reply and speak it. If the brain fails, say so politely."""
+        if self.brain:
+            sentences = self.brain.respond_stream(text)
+        elif self._get_brain:
+            # There is a brain, but it couldn't start (e.g. no API key).
+            self.log.emit(f"Can't reach Gemini: {self._brain_problem}", "BRAIN")
+            sentences = [OFFLINE_LINE]
+        else:
+            sentences = [text]   # echo mode: no brain/ folder, so say it back
+
+        failure = self._speak(sentences)
+        if isinstance(failure, BrainError):
+            # No internet, bad key, Gemini down... Log the reason, then say the
+            # saved line instead (unless you've already talked over her).
+            self.log.emit(f"Can't reach Gemini: {failure}", "BRAIN")
+            if not self._cancel.is_set():
+                failure = self._speak([OFFLINE_LINE])
+        if failure:
+            raise failure   # anything else (e.g. no voice works): _run_jobs logs it
+
+    def _speak(self, sentences):
+        """
+        Speak `sentences` one by one, as soon as each is ready.
+        Returns the error if something failed along the way, otherwise None.
+        """
         # Each reply gets its own "stop" flag. If you interrupt, this reply's
         # maker sees it and stops, without affecting the next reply.
         cancel = threading.Event()
         self._cancel = cancel
-        sentences = self.brain.respond_stream(text) if self.brain else [text]   # echo mode: say it back
         ready: queue.Queue = queue.Queue(maxsize=READY_AHEAD)
         maker = threading.Thread(target=self._make_audio, args=(sentences, ready, cancel), daemon=True)
         maker.start()
@@ -179,7 +219,7 @@ class VoiceController(QObject):
         failure = None
         while True:
             if cancel.is_set():
-                return                # interrupted: stop now; the maker tidies up by itself
+                return None           # interrupted: stop now; the maker tidies up by itself
             try:
                 item = ready.get(timeout=0.1)   # check for an interruption 10 times a second
             except queue.Empty:
@@ -200,9 +240,10 @@ class VoiceController(QObject):
             self.tts.play(audio_path, on_level=self.level.emit)
 
         if failure:
-            raise failure             # _run_jobs logs it and puts the eye back to idle
+            return failure            # _reply_to decides what to do about it
         if not cancel.is_set() and self.status in ("speaking", "working"):
             self._back_to_idle()
+        return None
 
     def _make_audio(self, sentences, ready: queue.Queue, cancel: threading.Event) -> None:
         """
