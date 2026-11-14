@@ -9,6 +9,7 @@ Try one of E.V.E.'s tools on its own, with no brain, HUD or voice.
     .venv\\Scripts\\python -m actions open_app spotify
     .venv\\Scripts\\python -m actions open_site youtube
     .venv\\Scripts\\python -m actions search_site youtube lo-fi beats
+    .venv\\Scripts\\python -m actions timer 5 pasta      (5 seconds; waits for it)
 
 It prints exactly what Gemini will be handed.
 """
@@ -33,6 +34,7 @@ SHORTCUTS = {
     "open_app": ("open_app", "name", {}),
     "open_site": ("open_website", "site", {}),
     "search_site": ("open_website", "site", {}),   # first word = site, the rest = search
+    "timer": ("set_timer", "seconds", {}),         # first word = seconds, the rest = label
 }
 
 if len(sys.argv) < 2 or sys.argv[1] not in SHORTCUTS:
@@ -42,6 +44,9 @@ if len(sys.argv) < 2 or sys.argv[1] not in SHORTCUTS:
 name, field, extra = SHORTCUTS[sys.argv[1]]
 if sys.argv[1] == "search_site":
     args = {"site": sys.argv[2] if len(sys.argv) > 2 else "", "search": " ".join(sys.argv[3:])}
+elif sys.argv[1] == "timer":
+    args = {"seconds": int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 0,
+            "label": " ".join(sys.argv[3:])}
 else:
     args = {field: " ".join(sys.argv[2:]), **extra}
 print(describe(name, args))
@@ -49,3 +54,13 @@ start = time.time()
 result = run_tool(name, args)
 print(json.dumps(result, indent=2, ensure_ascii=False))
 print(f"({time.time() - start:.1f}s)")
+
+if name == "set_timer" and "set" in result:
+    # Wait for the timer to go off, the way E.V.E. would.
+    import threading
+    from actions.timers import get_timers
+    done = threading.Event()
+    get_timers().when_done(lambda timer: (print(f"DONE: {timer.announcement()}"), done.set()))
+    while not done.wait(1):
+        for timer in get_timers().running():
+            print(f"  {timer.seconds_left():.0f}s left ", end="\r")

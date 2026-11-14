@@ -9,6 +9,10 @@ A third thread (the "listener") waits for speech while she's idle, and
 only passes on what was said to her by name. After she answers, she
 listens for a follow-up for FOLLOW_UP_SECONDS without needing her name.
 
+When a timer goes off (actions/timers.py), she says so: "Sir, your pasta
+timer is done." The announcement joins the same queue as her replies, so
+if she's in the middle of saying something, it waits until she's finished.
+
 Her reply is spoken sentence by sentence, like an assembly line:
 
     brain:    [sentence 1][sentence 2][sentence 3]
@@ -94,9 +98,16 @@ class VoiceController(QObject):
     mode_changed = Signal(str) # the brain's mode label, "FAST" or "THINK"
     wake_changed = Signal(bool)    # wake word switched on (True) or off (False)
     shutdown_requested = Signal()  # "Eve, shut down": the window should close
+    timer_done = Signal(str)   # a timer went off, e.g. "pasta timer": the eye should flash
 
-    def __init__(self, parent=None):
+    def __init__(self, timers=None, parent=None):
+        """`timers` is the timer keeper (actions/timers.py), if there is one."""
         super().__init__(parent)
+        if timers is not None:
+            # Called on the timer keeper's own thread. All we do there is send
+            # a signal and add a job to the queue, both safe from any thread.
+            timers.when_set(self._timer_set)
+            timers.when_done(self._timer_went_off)
         self.stt: SpeechToText | None = None
         self.tts: TextToSpeech | None = None
         self._get_brain = find_brain()
@@ -282,7 +293,9 @@ class VoiceController(QObject):
         """Stock phrases, then the "ready" message."""
         # Make her stock phrases now, while we're probably online, so they're
         # saved in the cache: instant to say, and they work with no internet.
-        lines = [wake_words.WAKE_REPLY, wake_words.SLEEP_REPLY, wake_words.SHUTDOWN_REPLY]
+        from actions.timers import announcement_for
+        lines = [wake_words.WAKE_REPLY, wake_words.SLEEP_REPLY, wake_words.SHUTDOWN_REPLY,
+                 announcement_for("")]   # "Sir, your timer is done."
         if self._get_brain:
             from brain.gemini_brain import FRESH_START_REPLY
             lines += [OFFLINE_LINE, FRESH_START_REPLY]
@@ -409,6 +422,53 @@ class VoiceController(QObject):
             self.caption.emit("you", text)
             self.log.emit(f"Heard: {text}", "VOICE")
             self._jobs.put(lambda r=request: self._reply_to(r, by_name=True))
+
+    # --- Timers (called on the timer keeper's thread) ----------------------
+
+    def _timer_set(self, timer) -> None:
+        """
+        A timer was just set. Get its announcement ready NOW, while we're
+        probably online, so it's saved in the phrase cache: instant when the
+        timer goes off, even with no internet. It's a queued job, so it never
+        holds up what she's saying.
+        """
+        text = timer.announcement()
+
+        def prepare() -> None:
+            if self.tts:
+                try:
+                    self.tts.prepare(text)
+                except Exception:
+                    pass   # it'll be made when needed instead
+        self._jobs.put(prepare)
+
+    def _timer_went_off(self, timer) -> None:
+        """Flash the eye and log it straight away; say it when she's free."""
+        self.timer_done.emit(timer.name())
+        self.log.emit(f"{timer.name().capitalize()} done", "TIMER")
+        self._jobs.put(lambda: self._announce(timer.announcement()))
+
+    def _announce(self, text: str) -> None:
+        """
+        Say a timer announcement (on the worker thread). Because it's a job,
+        it only starts once she's finished whatever she was saying.
+        """
+        if self._closing.is_set():
+            return
+        # Sir is holding Space and talking: don't talk over him.
+        while self.status == "recording" and not self._closing.is_set():
+            time.sleep(0.1)
+        if self.status == "working":
+            # He's just finished talking, and her answer is queued behind this
+            # job. Go to the back of the queue, so she answers him first.
+            self._jobs.put(lambda: self._announce(text))
+            return
+        self.status = "working"
+        self._stop_overhearing.set()   # so she doesn't hear herself
+        self._follow_up = False        # an announcement doesn't wait for a reply
+        self._awake_until = 0.0
+        self.caption.emit("you", "")
+        self._speak([text])            # goes back to idle by itself when done
 
     # --- Replying ---------------------------------------------------------
 

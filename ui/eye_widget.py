@@ -83,8 +83,9 @@ class EyeWidget(QWidget):
 
     def _draw_frame(self, p: QPainter, c: QPointF, r: float) -> None:
         """The big outer circle, plus small tick marks like a dial."""
+        flash = self.animator.flash_level   # brighter and thicker while flashing
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(with_alpha(theme.CYAN, 0.55), 2))
+        p.setPen(QPen(with_alpha(theme.CYAN, 0.55 + 0.45 * flash), 2 + 2 * flash))
         p.drawEllipse(c, r * FRAME_RADIUS, r * FRAME_RADIUS)
         p.setPen(QPen(with_alpha(theme.CYAN, 0.18), 1))
         p.drawEllipse(c, r * (FRAME_RADIUS - 0.04), r * (FRAME_RADIUS - 0.04))
@@ -123,7 +124,8 @@ class EyeWidget(QWidget):
             span = step - shape["gap"]
             for i in range(shape["segments"]):
                 start = rotation + i * step
-                strength = self._block_brightness(ring, i, step, start + span / 2)
+                # While flashing, every block lights up together.
+                strength = max(self._block_brightness(ring, i, step, start + span / 2), a.flash_level)
                 fill = with_alpha(theme.CYAN, (0.10 + 0.55 * strength) * (0.6 + 0.4 * a.glow) * fade_in)
                 edge = with_alpha(theme.CYAN, (0.30 + 0.70 * strength) * fade_in)
                 p.setBrush(fill)

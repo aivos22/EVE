@@ -22,7 +22,10 @@ from ui.eye_animator import EyeAnimator
 from ui.eye_state import STATE_KEYS, EyeState
 from ui.eye_widget import EyeWidget
 from ui.side_panel import ClockPanel, SystemPanel
+from ui.timer_panel import TimerPanel
 from ui.typewriter import Typewriter
+
+TEST_TIMER_SECONDS = 10   # the T key starts a timer this long
 
 # What the log feed says when E.V.E. enters each state.
 STATE_MESSAGES = {
@@ -42,11 +45,16 @@ class HudWindow(QWidget):
     wake_toggle_pressed = Signal()   # W key: switch the wake word ("Eve") on or off
     text_submitted = Signal(str)     # a message typed in the command bar (/ key)
 
-    def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None):
+    def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None,
+                 timers=None):
         super().__init__()
         # Use the animator and log we were given, or make our own for testing.
         self.animator = animator or EyeAnimator(self)
         self.event_log = event_log or EventLog(self)
+        if timers is None:
+            from actions.timers import get_timers
+            timers = get_timers()
+        self.timers = timers   # the timer keeper; the TIMERS panel shows what it holds
         self._drag_offset: QPoint | None = None
         self._booted = False
         self._you_said = ""   # caption text
@@ -87,6 +95,7 @@ class HudWindow(QWidget):
         # Side panels: clock on the left, system stats on the right.
         self.clock_panel = ClockPanel()
         self.system_panel = SystemPanel()
+        self.timer_panel = TimerPanel(self.timers)   # hides itself when no timers run
 
         self.eye = EyeWidget(self.animator)
 
@@ -135,7 +144,10 @@ class HudWindow(QWidget):
 
         row = QHBoxLayout()
         row.setSpacing(16)
-        row.addLayout(self._column(self.clock_panel))
+        # Left column: the clock in the middle, timers (when there are any) at the bottom.
+        left = self._column(self.clock_panel)
+        left.addWidget(self.timer_panel)
+        row.addLayout(left)
         row.addLayout(centre, stretch=1)
         row.addLayout(self._column(self.system_panel))
 
@@ -312,6 +324,9 @@ class HudWindow(QWidget):
             self._log_state(STATE_KEYS[key])
         elif key == "b":
             self.boot.start()  # replay the whole startup, text and all
+        elif key == "t":
+            self.timers.add(TEST_TIMER_SECONDS, "test")   # try the countdown and announcement
+            self.event_log.log(f"Test timer: {TEST_TIMER_SECONDS} seconds", "TIMER")
         elif key == "m":
             self.mode_toggle_pressed.emit()
         elif key == "w":

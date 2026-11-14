@@ -4,6 +4,7 @@ import sys
 from dotenv import load_dotenv
 from PySide6.QtWidgets import QApplication
 
+from actions.timers import get_timers
 from log_file import log_line, start_log_file
 from paths import BASE_DIR
 from ui.event_log import EventLog
@@ -26,8 +27,11 @@ def main():
     # voice and brain code can be handed the same objects and drive the HUD.
     animator = EyeAnimator()
     event_log = EventLog()   # anything can add a line: event_log.log("...")
-    window = HudWindow(animator, event_log)
-    voice = VoiceController()
+    # The timers run in actions/timers.py. The window shows them (TIMERS panel)
+    # and the voice announces them, so both are handed the same keeper.
+    timers = get_timers()
+    window = HudWindow(animator, event_log, timers)
+    voice = VoiceController(timers)
 
     # --- Wiring: connect signals from one part to functions in another ---
     # Window -> voice: holding and releasing Space.
@@ -51,6 +55,8 @@ def main():
     # Voice -> eye: listening / thinking / speaking / idle, and the speaking pulse.
     voice.state.connect(animator.set_state)
     voice.level.connect(animator.set_audio_level)
+    # Voice -> eye: a timer went off, so flash to get sir's attention.
+    voice.timer_done.connect(lambda name: animator.flash())
     # Stay in BOOTING after the boot text until the voice says it's ready,
     # so STANDBY really means "ready for you".
     window.boot.wait_for_ready = True
