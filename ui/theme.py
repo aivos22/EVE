@@ -18,6 +18,7 @@ CYAN_GLOW = QColor(0, 229, 255, 60)       # very soft cyan used for glows
 TEXT = QColor(190, 245, 255)              # light cyan-white for readable text
 TEXT_DIM = QColor(120, 180, 195)          # greyer text for labels
 WARNING = QColor(255, 170, 0)             # amber, for things like high CPU use
+DANGER = QColor(255, 70, 90)              # red, e.g. the close button on hover
 
 # --- Fonts ---------------------------------------------------------------
 # Consolas ships with Windows and gives a techy, monospaced look.

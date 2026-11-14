@@ -8,13 +8,15 @@ the same animator and change the eye's state.
 """
 
 from PySide6.QtCore import QPoint, QRectF, Qt
-from PySide6.QtGui import QPainter, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ui import theme
+from ui.boot_sequence import BootSequence
 from ui.eye_animator import EyeAnimator
 from ui.eye_state import STATE_KEYS, EyeState
 from ui.eye_widget import EyeWidget
+from ui.side_panel import ClockPanel, SystemPanel
 
 
 class HudWindow(QWidget):
@@ -23,11 +25,14 @@ class HudWindow(QWidget):
         # Use the animator we were given, or make our own for testing.
         self.animator = animator or EyeAnimator(self)
         self._drag_offset: QPoint | None = None
+        self._booted = False
+        self.boot = BootSequence(self.animator, self)
 
         self._setup_window()
         self._build_layout()
         self.animator.state_changed.connect(self._show_state)
         self._show_state(self.animator.state)
+        self.boot.text_changed.connect(self.boot_label.setText)
 
     # --- Window setup -----------------------------------------------------
 
@@ -41,11 +46,9 @@ class HudWindow(QWidget):
 
     def _build_layout(self) -> None:
         """Three columns: left panel | eye | right panel."""
-        # Placeholders for the side panels; step 6 fills these in.
-        self.left_panel = QWidget()
-        self.left_panel.setFixedWidth(theme.PANEL_WIDTH)
-        self.right_panel = QWidget()
-        self.right_panel.setFixedWidth(theme.PANEL_WIDTH)
+        # Side panels: clock on the left, system stats on the right.
+        self.clock_panel = ClockPanel()
+        self.system_panel = SystemPanel()
 
         self.eye = EyeWidget(self.animator)
 
@@ -54,19 +57,83 @@ class HudWindow(QWidget):
         self.status_label.setFont(theme.font(12, bold=True))
         self.status_label.setStyleSheet(f"color: {theme.CYAN.name()}; background: transparent;")
 
+        # Where the boot text gets typed. Fixed height so nothing jumps when it clears.
+        self.boot_label = QLabel()
+        self.boot_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.boot_label.setFont(theme.font(11))
+        self.boot_label.setFixedHeight(80)
+        self.boot_label.setStyleSheet(f"color: {theme.TEXT.name()}; background: transparent;")
+
         centre = QVBoxLayout()
         centre.addWidget(self.eye, stretch=1)
+        centre.addWidget(self.boot_label)
         centre.addWidget(self.status_label)
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(24, 24, 24, 24)
+        row = QHBoxLayout()
         row.setSpacing(16)
-        row.addWidget(self.left_panel)
+        row.addLayout(self._column(self.clock_panel))
         row.addLayout(centre, stretch=1)
-        row.addWidget(self.right_panel)
+        row.addLayout(self._column(self.system_panel))
+
+        # The whole window: top bar first, then the three columns below it.
+        page = QVBoxLayout(self)
+        page.setContentsMargins(24, 16, 24, 24)
+        page.addLayout(self._build_top_bar())
+        page.addLayout(row, stretch=1)
+
+    def _build_top_bar(self) -> QHBoxLayout:
+        """'E.V.E' on the left, a close (X) button on the right."""
+        title = QLabel("E.V.E")
+        title.setFont(theme.font(16, bold=True))
+        title.setStyleSheet(f"color: {theme.CYAN.name()}; background: transparent;")
+
+        close_button = QPushButton("X")
+        close_button.setFixedSize(32, 32)
+        close_button.setFont(theme.font(12, bold=True))
+        close_button.setCursor(Qt.PointingHandCursor)
+        close_button.setToolTip("Quit E.V.E.")
+        close_button.setFocusPolicy(Qt.NoFocus)  # so key presses still reach the window
+        # A stylesheet is like CSS for Qt: how the button looks normally and on hover.
+        close_button.setStyleSheet(f"""
+            QPushButton {{
+                color: {theme.CYAN.name()};
+                background: transparent;
+                border: 1px solid {theme.CYAN_DIM.name(QColor.HexArgb)};
+                border-radius: 6px;
+            }}
+            QPushButton:hover {{
+                color: white;
+                background: {theme.DANGER.name()};
+                border-color: {theme.DANGER.name()};
+            }}
+        """)
+        # When clicked, close the window. Closing the last window ends the program.
+        close_button.clicked.connect(self.close)
+
+        bar = QHBoxLayout()
+        bar.addWidget(title)
+        bar.addStretch()  # pushes the button all the way to the right
+        bar.addWidget(close_button)
+        return bar
+
+    @staticmethod
+    def _column(panel: QWidget) -> QVBoxLayout:
+        """Put a panel in a column with empty space above and below, so it sits in the middle."""
+        col = QVBoxLayout()
+        col.addStretch()
+        col.addWidget(panel)
+        col.addStretch()
+        return col
 
     def _show_state(self, state: EyeState) -> None:
         self.status_label.setText(f"STATUS // {state.name}")
+
+    def showEvent(self, event):
+        # Play the boot sequence the first time the window appears.
+        super().showEvent(event)
+        if not self._booted:
+            self._booted = True
+            self.boot.start()
 
     # --- Drawing the window background ----------------------------------
 
@@ -86,7 +153,7 @@ class HudWindow(QWidget):
         if key in STATE_KEYS:
             self.animator.set_state(STATE_KEYS[key])
         elif key == "b":
-            self.animator.restart_boot()
+            self.boot.start()  # replay the whole startup, text and all
         elif event.key() == Qt.Key_Escape:
             self.close()
 
