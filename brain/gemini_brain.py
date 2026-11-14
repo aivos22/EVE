@@ -161,6 +161,15 @@ class Brain:
         sentence as soon as it's ready, and whoever is looping over it gets
         that sentence straight away.
         """
+        # "Start fresh" / "forget that": wipe her memory instead of asking
+        # Gemini. Instant, works offline, and isn't itself remembered.
+        if wants_fresh_start(text):
+            remembered = len(self.history) // 2
+            self.forget()
+            self.on_note(f"Memory cleared ({remembered} exchanges forgotten)")
+            yield FRESH_START_REPLY
+            return
+
         message = types.Content(role="user", parts=[types.Part(text=text)])
         said = []   # every sentence handed out, to remember at the end
         try:
@@ -272,6 +281,36 @@ class Brain:
     def forget(self) -> None:
         """Wipe the conversation memory (a fresh start)."""
         self.history.clear()
+
+
+# --- "Start fresh" ----------------------------------------------------------
+
+# Say (or type) any of these on its own, and she forgets the conversation so far.
+# Add your own here; write them in lower case, without punctuation.
+FRESH_START_PHRASES = {
+    "start fresh", "start afresh", "fresh start", "start over", "start again",
+    "forget that", "forget it", "forget everything", "forget all that",
+    "clear your memory", "wipe your memory", "reset your memory",
+    "new conversation", "new topic", "clean slate",
+}
+FRESH_START_REPLY = "Clean slate, sir."
+# Polite or extra words that may come before/after, e.g. "Eve, please start fresh".
+FILLER_WORDS = {"eve", "hey", "ok", "okay", "please", "can", "you", "could", "lets", "let's", "now", "just"}
+
+
+def wants_fresh_start(text: str) -> bool:
+    """
+    True if `text` is just a "start fresh" command, like "Start fresh." or
+    "Eve, forget that please". Only the WHOLE message counts, so "forget that
+    I'm vegetarian, I'm not" is treated as a normal message, not a reset.
+    """
+    words = re.sub(r"[^a-z' ]", " ", text.lower()).split()   # lower case, no punctuation
+    # Trim polite words off both ends (not the middle).
+    while words and words[0] in FILLER_WORDS:
+        words.pop(0)
+    while words and words[-1] in FILLER_WORDS:
+        words.pop()
+    return " ".join(words) in FRESH_START_PHRASES
 
 
 # --- What's going on right now ----------------------------------------------

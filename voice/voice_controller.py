@@ -183,12 +183,14 @@ class VoiceController(QObject):
             self.log.emit(note, "TTS")
         self._connect_brain()
         if self._get_brain:
-            # Make her "can't reach my systems" line now, while we're probably
-            # online, so it's saved in the cache and plays even with no internet.
-            try:
-                self.tts.prepare(OFFLINE_LINE)
-            except Exception:
-                pass   # not worth failing start-up over; she'll try again when needed
+            # Make her stock phrases now, while we're probably online, so they're
+            # saved in the cache: instant to say, and they work with no internet.
+            from brain.gemini_brain import FRESH_START_REPLY
+            for line in (OFFLINE_LINE, FRESH_START_REPLY):
+                try:
+                    self.tts.prepare(line)
+                except Exception:
+                    pass   # not worth failing start-up over; she'll try again when needed
         mode = "brain connected" if self.brain else "echo mode" if not self._get_brain else "brain offline"
         self.log.emit(f"Ready, {mode}. Hold Space to talk", "VOICE")
         self.ready.emit()
