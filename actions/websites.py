@@ -42,10 +42,13 @@ def open_website(site: str, search: str = "") -> dict:
     """
     site = site.strip()
     search = " ".join(search.split())
+    # Most results have a "say" line: what she says straight away, without
+    # asking Gemini to word it (one request saved; see actions/__init__.py).
+    # "Can't search that site" has none, so Gemini can offer another way.
     try:
         friendly, entry = settings.find("websites", site)
     except settings.SettingsError as error:
-        return {"error": str(error)}
+        return {"error": str(error), "say": "My actions file has a mistake in it, sir. The log has the details."}
 
     if friendly:
         if search:
@@ -73,14 +76,23 @@ def open_website(site: str, search: str = "") -> dict:
             # Just a name we don't know, rather than a bad address.
             return {"error": f"{site} isn't a website I know",
                     "tell_sir": "Add it to data/actions.json, or give me its full address.",
-                    "websites_i_know": settings.known_names("websites")}
-        return {"error": f"I won't open that address: {problem}"}
+                    "websites_i_know": settings.known_names("websites"),
+                    "say": f"I don't know a website called {site}, sir. "
+                           "You can add it to the actions file in my data folder."}
+        return {"error": f"I won't open that address: {problem}",
+                "say": "I'd rather not open that address, sir. It doesn't look like an ordinary web page."}
 
     if not webbrowser.open(url):
-        return {"error": "Windows couldn't open the web browser"}
-    result = {"opened": name or urlsplit(url).netloc}
+        return {"error": "Windows couldn't open the web browser",
+                "say": "Windows wouldn't open the web browser for me, sir."}
+    # For an address, say just the site's name: "python.org", not "https://www.python..."
+    name = name or urlsplit(url).hostname.removeprefix("www.")
+    result = {"opened": name}
     if search:
         result["searched_for"] = search
+        result["say"] = f"Searching {name} for {search}, sir."
+    else:
+        result["say"] = f"Opening {name}, sir."
     return result
 
 

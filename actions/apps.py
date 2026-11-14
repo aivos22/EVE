@@ -55,24 +55,33 @@ def open_app(name: str) -> dict:
     Args:
         name: The app's name as sir said it, e.g. "spotify" or "vs code".
     """
+    # Each result has a "say" line: what she says straight away, without
+    # asking Gemini to word it (one request saved; see actions/__init__.py).
     try:
         friendly, entry = settings.find("apps", name)
     except settings.SettingsError as error:
-        return {"error": str(error)}
+        return {"error": str(error), "say": SETTINGS_BROKEN}
     if friendly is None:
         return {
             "error": f"{name} isn't set up",
             "tell_sir": f"Add {name} to data/actions.json to let me open it.",
             "apps_i_can_open": settings.known_names("apps"),
+            "say": f"I don't have {name} set up, sir. You can add it to the actions file in my data folder.",
         }
     try:
         launch(entry["open"])
     except NotFound as problem:
         return {"error": f"{friendly} is on the list but wasn't found on this PC: {problem}",
-                "tell_sir": "Check it's installed, or fix its 'open' line in data/actions.json."}
+                "tell_sir": "Check it's installed, or fix its 'open' line in data/actions.json.",
+                "say": f"{friendly} is on my list, sir, but I can't find it on this PC."}
     except OSError as error:   # Windows refused, e.g. the shortcut is broken
-        return {"error": f"Windows couldn't open {friendly}: {error.strerror or error}"}
-    return {"opened": friendly}
+        return {"error": f"Windows couldn't open {friendly}: {error.strerror or error}",
+                "say": f"Windows wouldn't open {friendly} for me, sir."}
+    return {"opened": friendly, "say": f"Opening {friendly}, sir."}
+
+
+# Said when data/actions.json can't be read. (The exact reason goes in the diary.)
+SETTINGS_BROKEN = "My actions file has a mistake in it, sir. The log has the details."
 
 
 def launch(how: str) -> None:

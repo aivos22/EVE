@@ -210,13 +210,17 @@ def set_timer(hours: int = 0, minutes: int = 0, seconds: int = 0, label: str = "
         seconds: Seconds, if any.
         label: A short name if sir gave one, e.g. "pasta". Otherwise leave empty.
     """
+    # "say" = what she says straight away, without asking Gemini to word it
+    # (one request saved; see actions/__init__.py).
     total = round(float(hours or 0) * 3600 + float(minutes or 0) * 60 + float(seconds or 0))
     try:
         timer = get_timers().add(total, label)
     except ValueError as problem:
-        return {"error": str(problem)}
+        return {"error": str(problem), "say": f"I couldn't set that timer, sir: {problem}."}
+    length = say_duration(timer.seconds)
     return {"set": timer.name(), "number": timer.number,
-            "length": say_duration(timer.seconds), "goes_off_at": clock_time(timer.seconds)}
+            "length": length, "goes_off_at": clock_time(timer.seconds),
+            "say": f"{timer.name().capitalize()} set for {length}, sir."}
 
 
 def cancel_timer(which: str = "") -> dict:
@@ -231,8 +235,15 @@ def cancel_timer(which: str = "") -> dict:
     try:
         stopped = get_timers().cancel(which)
     except ValueError as problem:
-        return {"error": str(problem), "running": [t.name() for t in get_timers().running()]}
-    return {"cancelled": [t.name() for t in stopped], "still_running": len(get_timers().running())}
+        running = [t.name() for t in get_timers().running()]
+        result = {"error": str(problem), "running": running}
+        if not running:   # nothing to choose from: a quick reply will do
+            result["say"] = "There are no timers running, sir."
+        return result     # otherwise Gemini helps work out which one sir meant
+    said = (f"{stopped[0].name().capitalize()} cancelled, sir." if len(stopped) == 1
+            else f"All {len(stopped)} timers cancelled, sir.")
+    return {"cancelled": [t.name() for t in stopped], "still_running": len(get_timers().running()),
+            "say": said}
 
 
 def list_timers() -> dict:

@@ -20,13 +20,16 @@ still being made into audio.
 The conversation is capped at MAX_EXCHANGES back-and-forths, so it never
 grows forever (and each request stays quick and cheap).
 
-She can also use tools from the actions/ folder (weather, Wikipedia, web
-search). Gemini decides when a question needs one; see _text_pieces().
+She can also use tools from the actions/ folder: look-ups (weather,
+Wikipedia, web search, memory) and actions (open apps and websites,
+timers). Gemini decides when a message needs one; see _text_pieces().
+Anything risky asks sir first; see brain/confirm.py.
 
 This file knows nothing about the HUD or the voice. It just turns text
 into a reply, so it can be tested on its own:  .venv\\Scripts\\python -m brain
 """
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -36,6 +39,8 @@ from pathlib import Path
 from google import genai
 from google.genai import errors, types
 
+from brain import confirm
+from brain.commands import command_words
 from brain.memory import get_memory
 
 # google-genai talks to the internet through a web library: "httpx2" in the
@@ -52,6 +57,7 @@ CONNECTION_ERRORS = tuple(lib.TransportError for lib in _WEB_LIBS)  # couldn't c
 WEB_ERRORS = tuple(lib.HTTPError for lib in _WEB_LIBS)              # any of the above, and more
 
 PERSONALITY_FILE = Path(__file__).parent / "personality.txt"
+diary = logging.getLogger("eve")   # the diary in data/logs/ (see log_file.py)
 
 # Her tools (weather, Wikipedia, web search) live in the actions/ folder.
 # If that folder is missing or broken, she just works without them.
@@ -136,8 +142,6 @@ class Brain:
         # with None when the tools are done. The voice uses it for the log and
         # the eye's LOOKING state. On its own, we print it.
         self.on_tool = lambda text: text and print(f"       ({text})")
-        # True after she's asked "forget everything about you, are you sure?"
-        self._wipe_pending = False
 
     # --- Modes ----------------------------------------------------------
 
@@ -165,6 +169,19 @@ class Brain:
         sentence as soon as it's ready, and whoever is looping over it gets
         that sentence straight away.
         """
+        # FIRST: was she waiting for a "yes" (brain/confirm.py)? A yes does the
+        # action; anything else cancels it and is then handled as usual below.
+        # Checked here, in our own code before Gemini, so only sir's own
+        # "yes" as his very next message can set it off.
+        waiting = confirm.waiting_for()
+        done_line = confirm.answer(text)
+        if done_line:
+            self.on_note(f"Confirmed: {waiting}")
+            yield done_line
+            return
+        if waiting:
+            self.on_note(f"Not confirmed, cancelled: {waiting}")
+
         # "Start fresh" / "forget that": wipe her memory instead of asking
         # Gemini. Instant, works offline, and isn't itself remembered.
         if wants_fresh_start(text):
@@ -175,23 +192,20 @@ class Brain:
             return
 
         # "Forget everything about me": ask first, then wipe on a "yes".
-        if self._wipe_pending:
-            self._wipe_pending = False
-            if is_yes(text):
-                count = get_memory().forget_everything()   # (a backup copy is kept)
-                self.on_note(f"Long-term memory wiped ({count} facts, backup in data/memory.backup.json)")
-                yield "Done, sir. I've forgotten everything I knew about you."
-                return
-            # Anything else cancels, and is then answered as a normal message.
-            self.on_note("Memory wipe cancelled")
         if wants_memory_wipe(text):
             count = len(get_memory())
             if count == 0:
                 yield "There's nothing to forget, sir. I haven't saved anything about you yet."
                 return
-            self._wipe_pending = True
+
+            def wipe() -> str:
+                wiped = get_memory().forget_everything()   # (a backup copy is kept)
+                self.on_note(f"Long-term memory wiped ({wiped} facts, backup in data/memory.backup.json)")
+                return "Done, sir. I've forgotten everything I knew about you."
+
             facts = "one thing" if count == 1 else f"all {count} things"
-            yield f"Just to be sure, sir: that erases {facts} I remember about you. Say yes to confirm."
+            question = f"Just to be sure, sir: that erases {facts} I remember about you. Say yes to confirm."
+            yield confirm.ask_first(question, wipe, "wipe long-term memory")["say"]
             return
 
         message = types.Content(role="user", parts=[types.Part(text=text)])
@@ -291,13 +305,29 @@ class Brain:
             # "thought signature" that Gemini needs to see again.
             contents.append(types.Content(role="model", parts=reply_parts))
             results = []
+            quick_lines = []   # each tool's ready-made "say" line, if it has one
             for request in tool_requests:
                 args = dict(request.args or {})
                 self.on_tool(describe_tool(request.name, args))
                 result = run_tool(request.name, args)
+                quick_lines.append(result.get("say") if isinstance(result, dict) else None)
                 results.append(types.Part(function_response=types.FunctionResponse(
                     id=request.id, name=request.name, response=result)))
             self.on_tool(None)   # tools finished, back to thinking
+
+            # Quick reply: actions like "open Spotify" or "set a timer" come back
+            # with a line ready to say ("Opening Spotify, sir."). If EVERY tool
+            # this round has one, say those instead of asking Gemini to word the
+            # answer: one request instead of two (the free plan allows 15 a minute).
+            # Look-ups (weather...) have no "say" line, so Gemini still words those.
+            if all(quick_lines):
+                diary.info("Quick reply: no second Gemini request needed")
+                for number, line in enumerate(quick_lines, start=1):
+                    if number < len(quick_lines):
+                        # Several actions at once: only the last line ends in "sir".
+                        line = re.sub(r",? sir([.?!])$", r"\1", line)
+                    yield "\n" + line   # the line break keeps each one a separate sentence
+                return
             contents.append(types.Content(role="user", parts=results))
 
     def _remember(self, message: types.Content, reply: str) -> None:
@@ -322,22 +352,7 @@ FRESH_START_PHRASES = {
     "new conversation", "new topic", "clean slate",
 }
 FRESH_START_REPLY = "Clean slate, sir."
-# Polite or extra words that may come before/after, e.g. "Eve, please start fresh".
-FILLER_WORDS = {"eve", "hey", "ok", "okay", "please", "can", "you", "could", "lets", "let's", "now", "just"}
-
-
-def command_words(text: str) -> str:
-    """
-    Boil a message down for matching commands: lower case, no punctuation,
-    polite words trimmed off both ends. "Eve, start fresh please!" -> "start fresh"
-    """
-    words = re.sub(r"[^a-z' ]", " ", text.lower()).split()   # lower case, no punctuation
-    # Trim polite words off both ends (not the middle).
-    while words and words[0] in FILLER_WORDS:
-        words.pop(0)
-    while words and words[-1] in FILLER_WORDS:
-        words.pop()
-    return " ".join(words)
+# (command_words() trims polite words and punctuation; it's in brain/commands.py.)
 
 
 def wants_fresh_start(text: str) -> bool:
@@ -350,7 +365,8 @@ def wants_fresh_start(text: str) -> bool:
 
 
 # "Forget everything about me": wipes her LONG-TERM memory (data/memory.json),
-# not just the conversation. Because that's hard to undo, she asks first.
+# not just the conversation. Because that's hard to undo, she asks first
+# (brain/confirm.py), and only a "yes" as the very next message does it.
 MEMORY_WIPE_PHRASES = {
     "forget everything about me", "forget everything you know about me",
     "forget all about me", "forget all you know about me", "forget me",
@@ -358,16 +374,10 @@ MEMORY_WIPE_PHRASES = {
     "delete everything you know about me", "delete everything about me",
     "clear your long term memory", "wipe your long term memory",
 }
-YES_WORDS = {"yes", "yes forget everything", "yes do it", "yes i'm sure", "yes im sure",
-             "confirm", "confirmed", "do it", "i'm sure", "im sure", "yep", "yeah"}
 
 
 def wants_memory_wipe(text: str) -> bool:
     return command_words(text) in MEMORY_WIPE_PHRASES
-
-
-def is_yes(text: str) -> bool:
-    return command_words(text) in YES_WORDS
 
 
 # --- What's going on right now ----------------------------------------------

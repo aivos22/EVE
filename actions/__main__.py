@@ -52,7 +52,7 @@ else:
 print(describe(name, args))
 start = time.time()
 result = run_tool(name, args)
-print(json.dumps(result, indent=2, ensure_ascii=False))
+print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
 print(f"({time.time() - start:.1f}s)")
 
 if name == "set_timer" and "set" in result:
