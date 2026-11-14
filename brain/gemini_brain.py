@@ -36,6 +36,8 @@ from pathlib import Path
 from google import genai
 from google.genai import errors, types
 
+from brain.memory import get_memory
+
 # google-genai talks to the internet through a web library: "httpx2" in the
 # version we have, plain "httpx" in older ones. We only need their error
 # types, so we collect them from whichever is installed.
@@ -222,11 +224,15 @@ class Brain:
         # added to it. They're NOT saved in her long-term history, which only
         # keeps what you said and what she said, so it stays small.
         contents = self.history + [message]
+        # Her instructions (personality + date + memory) are made ONCE per
+        # question. If she saves a fact mid-answer, she shouldn't then see it
+        # in her memory and think she "already knew" it.
+        instructions = self.personality + situation()
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # On the last round, don't offer tools, so she has to answer.
             offer_tools = bool(TOOLS) and round_number < MAX_TOOL_ROUNDS
             config = types.GenerateContentConfig(
-                system_instruction=self.personality + situation(),
+                system_instruction=instructions,
                 max_output_tokens=MAX_REPLY_TOKENS,
                 thinking_config=types.ThinkingConfig(thinking_level=mode.thinking),
                 http_options=types.HttpOptions(timeout=mode.timeout * 1000),   # milliseconds
@@ -318,8 +324,8 @@ def wants_fresh_start(text: str) -> bool:
 def situation() -> str:
     """
     A few lines added after her personality on EVERY request, so she always
-    knows the current date and time (Gemini has no clock of its own) and
-    where sir lives. Made fresh each time, so the time is always right.
+    knows the current date and time (Gemini has no clock of its own), where
+    sir lives, and what she remembers about him. Made fresh each time.
     """
     now = datetime.now().astimezone()   # this PC's local time and time zone
     hour = now.strftime("%I").lstrip("0")   # "03" -> "3"
@@ -332,6 +338,13 @@ def situation() -> str:
     home = os.getenv("EVE_HOME_CITY", "").strip()
     if home:
         lines.append(f"Sir lives in {home}. Assume he means there unless he says otherwise.")
+
+    # Her long-term memory (data/memory.json), read fresh every time, so a
+    # fact saved a moment ago is already known in the very next answer.
+    facts = get_memory().as_text()
+    lines.append("")
+    lines.append("What you remember about sir from earlier conversations (your long-term memory, numbered):")
+    lines.append(facts or "(nothing yet)")
     return "\n".join(lines)
 
 

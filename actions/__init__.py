@@ -12,11 +12,12 @@ To add a new tool later:
 
 import logging
 
+from actions.memory_tools import forget_about_sir, remember_about_sir
 from actions.weather import get_weather
 from actions.web_search import search_web
 from actions.wikipedia import look_up_wikipedia
 
-TOOLS = [get_weather, look_up_wikipedia, search_web]
+TOOLS = [get_weather, look_up_wikipedia, search_web, remember_about_sir, forget_about_sir]
 _BY_NAME = {tool.__name__: tool for tool in TOOLS}
 
 # What the log says while each tool runs, e.g. "[ACTION] Checking weather: Leeds".
@@ -24,12 +25,16 @@ LABELS = {
     "get_weather": "Checking weather",
     "look_up_wikipedia": "Looking up",
     "search_web": "Searching the web",
+    "remember_about_sir": "Remembering",
+    "forget_about_sir": "Forgetting fact",
 }
 
 
 def describe(name: str, args: dict) -> str:
     """A short line for the log saying what's happening."""
-    detail = next((str(value) for value in args.values() if isinstance(value, str) and value), "")
+    # The first filled-in detail, preferring text (e.g. the fact, not its number).
+    values = sorted((value for value in args.values() if value), key=lambda v: not isinstance(v, str))
+    detail = str(values[0]) if values else ""
     label = LABELS.get(name, f"Running {name}")
     return f"{label}: {detail}" if detail else label
 
