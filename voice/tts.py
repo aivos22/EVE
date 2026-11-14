@@ -31,6 +31,7 @@ from voice.audio_player import AudioPlayer
 TEMP_DIR = DATA_DIR / "tts_temp"     # freshly made speech, overwritten each time
 CACHE_DIR = DATA_DIR / "tts_cache"   # saved phrases, kept between runs
 CACHE_MAX_CHARS = 80                 # only cache short phrases; long replies are rarely repeated
+TEMP_FILES = 8                       # speech_0..7.wav; more than enough sentences "in flight" at once
 
 # ElevenLabs settings
 ELEVEN_MODEL = "eleven_flash_v2_5"   # fast, and costs half the credits of the bigger models
@@ -56,6 +57,7 @@ class TextToSpeech:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         self.player = AudioPlayer()
         self.notes: list[str] = []   # why a voice was skipped, for the log
+        self._temp_number = 0        # which speech_N.wav to write next
 
         # Where to start in ENGINE_ORDER.
         wanted = os.getenv("EVE_TTS", "elevenlabs").strip().lower()
@@ -100,7 +102,7 @@ class TextToSpeech:
             cached = self._cache_path(engine, text)
             if cached and cached.exists():
                 return cached, f"{name}, cached"
-            path = cached or TEMP_DIR / "speech.wav"
+            path = cached or self._next_temp_file()
             try:
                 self._make(engine, text, path)
             except Exception as error:
@@ -110,6 +112,15 @@ class TextToSpeech:
             source = name if not problems else f"{name}; {problems[-1]}"
             return path, source
         raise RuntimeError("no voice could speak: " + "; ".join(problems))
+
+    def _next_temp_file(self):
+        """
+        A fresh file name for new speech: speech_0.wav, speech_1.wav ... then
+        round again. When she speaks sentence by sentence, the next sentence
+        is being made while this one plays, so they can't share one file.
+        """
+        self._temp_number = (self._temp_number + 1) % TEMP_FILES
+        return TEMP_DIR / f"speech_{self._temp_number}.wav"
 
     def play(self, wav_path, on_level=None) -> None:
         """Play a prepared file. Waits until she has finished speaking."""
@@ -151,7 +162,8 @@ class TextToSpeech:
             return
         status = getattr(error, "status_code", None)   # the HTTP error number, if any
         message = self._short(error).lower()
-        if status in (401, 402) or any(word in message for word in ("quota", "credit")):
+        dead_ends = ("quota", "credit", "subscription", "upgrade")   # e.g. "free users cannot use library voices"
+        if status in (401, 402) or any(word in message for word in dead_ends):
             self._drop("elevenlabs", self._short(error))
 
     @staticmethod
@@ -185,7 +197,9 @@ class TextToSpeech:
         swap it into place, so a failure halfway never leaves a broken file
         in the cache.
         """
-        temp = TEMP_DIR / "writing.wav"
+        # Each file gets its own temporary name, because an interrupted reply can
+        # still be finishing a sentence while the next reply starts making one.
+        temp = TEMP_DIR / f"writing_{wav_path.name}"
         with wave.open(str(temp), "wb") as wav:
             wav.setnchannels(1)    # mono
             wav.setsampwidth(2)    # 16-bit samples

@@ -35,6 +35,7 @@ class HudWindow(QWidget):
     # Push-to-talk. The window only reports the key; voice code decides what to do.
     talk_pressed = Signal()
     talk_released = Signal()
+    mode_toggle_pressed = Signal()   # M key: switch the brain between fast and think
 
     def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None):
         super().__init__()
@@ -45,7 +46,8 @@ class HudWindow(QWidget):
         self._booted = False
         self._you_said = ""   # caption text
         self._eve_said = ""
-        self.boot = BootSequence(self.animator, self.event_log, self)
+        self._mode = ""       # the brain's mode, shown after the status, e.g. "FAST"
+        self.boot =BootSequence(self.animator, self.event_log, self)
         self.shutdown_sequence = ShutdownSequence(self.animator, self.event_log, self)
         self.shutdown_sequence.finished.connect(self._fade_out)
 
@@ -164,9 +166,16 @@ class HudWindow(QWidget):
     def _show_state(self, state: EyeState) -> None:
         word, colour = theme.STATE_STYLE[state]
         # Rich text (a tiny bit of HTML) lets one label use two colours.
-        self.status_label.setText(
-            f'<span style="color:{theme.TEXT_DIM.name()}">STATUS //</span> '
-            f'<span style="color:{colour.name()}">{word}</span>')
+        text = (f'<span style="color:{theme.TEXT_DIM.name()}">STATUS //</span> '
+                f'<span style="color:{colour.name()}">{word}</span>')
+        if self._mode:
+            text += f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;MODE // {self._mode}</span>'
+        self.status_label.setText(text)
+
+    def show_mode(self, mode: str) -> None:
+        """Show the brain's mode (e.g. "FAST" or "THINK") next to the status."""
+        self._mode = mode
+        self._show_state(self.animator.state)
 
     def show_caption(self, who: str, text: str) -> None:
         """
@@ -250,6 +259,8 @@ class HudWindow(QWidget):
             self._log_state(STATE_KEYS[key])
         elif key == "b":
             self.boot.start()  # replay the whole startup, text and all
+        elif key == "m":
+            self.mode_toggle_pressed.emit()
         elif event.key() == Qt.Key_Escape:
             self.shutdown()
 

@@ -30,9 +30,12 @@ def main():
     # Window -> voice: holding and releasing Space.
     window.talk_pressed.connect(voice.talk_pressed)
     window.talk_released.connect(voice.talk_released)
-    # Voice -> window: log lines and captions.
+    # Window -> voice: M switches the brain between fast and think mode.
+    window.mode_toggle_pressed.connect(voice.toggle_mode)
+    # Voice -> window: log lines, captions and the brain's mode.
     voice.log.connect(lambda message, source: event_log.log(message, source))
     voice.caption.connect(window.show_caption)
+    voice.mode_changed.connect(window.show_mode)
     # Voice -> eye: listening / thinking / speaking / idle, and the speaking pulse.
     voice.state.connect(animator.set_state)
     voice.level.connect(animator.set_audio_level)

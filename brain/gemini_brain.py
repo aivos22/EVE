@@ -6,6 +6,17 @@ Each request sends three things:
   2. the recent conversation, so she remembers what you've been talking about
   3. your new message
 
+She has two modes (see MODES below):
+  fast  - the quick model, and the reply is STREAMED: it arrives a few words
+          at a time, and we hand out each sentence as soon as it's complete,
+          so she can start speaking before the rest is written.
+  think - a stronger model that thinks harder first. The full answer is
+          written before she says anything, so it takes longer.
+
+Either way, respond_stream() hands out the reply one sentence at a time.
+The voice uses that to start speaking sentence one while sentence two is
+still being made into audio.
+
 The conversation is capped at MAX_EXCHANGES back-and-forths, so it never
 grows forever (and each request stays quick and cheap).
 
@@ -15,28 +26,41 @@ into a reply, so it can be tested on its own:  .venv\\Scripts\\python -m brain
 
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
+import httpx   # the web library google-genai uses underneath; we only need its timeout error
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 
 PERSONALITY_FILE = Path(__file__).parent / "personality.txt"
 
-# Which Gemini model to use. Tested Nov 2026: 3.5 Flash-Lite answers in under
-# a second and still sounds like her; full 3.5 Flash took 2-20 seconds. To try
-# a different one without touching code, add e.g.
-#     EVE_GEMINI_MODEL=gemini-3.5-flash
-# to .env.
-DEFAULT_MODEL = "gemini-3.5-flash-lite"
-# How hard the model "thinks" before answering. "minimal" = fastest replies,
-# which matters more than deep reasoning for a spoken assistant.
-THINKING_LEVEL = "minimal"
+
+@dataclass
+class Mode:
+    label: str          # shown in the log, e.g. "Fast"
+    model: str          # which Gemini model
+    thinking: str       # how hard it thinks first: "minimal", "low", "medium" or "high"
+    stream: bool        # True = hand out sentences while the reply is still arriving
+    timeout: int        # seconds to wait before giving up
+
+
+# The two modes. Each model can be changed in .env without touching code,
+# e.g.  EVE_FAST_MODEL=gemini-3.5-flash-lite   or   EVE_THINK_MODEL=gemini-3.8-flash
+# Tested Nov 2026: 3.5 Flash-Lite answers in under a second and still sounds like her.
+MODES = {
+    "fast": Mode("Fast", os.getenv("EVE_FAST_MODEL", "gemini-3.5-flash-lite"), "minimal", True, 20),
+    "think": Mode("Think", os.getenv("EVE_THINK_MODEL", "gemini-3.5-flash"), "high", False, 30),
+}
+DEFAULT_MODE = "fast"
 
 MAX_EXCHANGES = 10      # how many of your messages (and her replies) she remembers
-TIMEOUT_SECONDS = 20    # give up on a request after this long, so she never hangs
 # A hard cap on the reply. It's generous because the model's hidden "thinking"
 # counts towards it too; personality.txt is what actually keeps answers short.
-MAX_REPLY_TOKENS = 2000
+MAX_REPLY_TOKENS = 8000
+# Error numbers that mean "Google's side is busy or broken right now", not
+# "you did something wrong". In think mode we fall back to the fast model.
+BUSY_CODES = (429, 500, 503, 504)
 
 
 class Brain:
@@ -44,42 +68,141 @@ class Brain:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise RuntimeError("No GEMINI_API_KEY in .env")
-        self.model = os.getenv("EVE_GEMINI_MODEL", DEFAULT_MODEL)
-        # The client is our connection to Gemini. Timeout is in milliseconds.
-        self.client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(timeout=TIMEOUT_SECONDS * 1000),
-        )
+        # The client is our connection to Gemini.
+        self.client = genai.Client(api_key=api_key)
         self.personality = PERSONALITY_FILE.read_text(encoding="utf-8")
         # The conversation so far: a list of messages, alternating "user" and "model".
         self.history: list[types.Content] = []
+        wanted = os.getenv("EVE_BRAIN_MODE", DEFAULT_MODE).strip().lower()
+        self.mode = wanted if wanted in MODES else DEFAULT_MODE
+        # Something to call with short notes for the log (e.g. "think model busy").
+        # The voice controller swaps this for its own log; on its own, we just print.
+        self.on_note = print
+
+    # --- Modes ----------------------------------------------------------
+
+    def toggle_mode(self) -> str:
+        """Switch fast <-> think. Returns the new mode's name."""
+        self.mode = "think" if self.mode == "fast" else "fast"
+        return self.mode
+
+    def describe(self) -> str:
+        """One line for the log, e.g. 'Fast mode (gemini-3.5-flash-lite)'."""
+        mode = MODES[self.mode]
+        return f"{mode.label} mode ({mode.model})"
+
+    # --- Replying -------------------------------------------------------
 
     def respond(self, text: str) -> str:
-        """Send `text` to Gemini and return E.V.E.'s reply as plain spoken text."""
-        message = types.Content(role="user", parts=[types.Part(text=text)])
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=self.history + [message],
-            config=types.GenerateContentConfig(
-                system_instruction=self.personality,
-                max_output_tokens=MAX_REPLY_TOKENS,
-                thinking_config=types.ThinkingConfig(thinking_level=THINKING_LEVEL),
-            ),
-        )
-        reply = clean_for_speech(response.text or "")
-        if not reply:
-            reply = "I'm afraid I drew a blank there, sir."
+        """Send `text` and return the whole reply as one string."""
+        return " ".join(self.respond_stream(text))
 
-        # Only remember the exchange once it has worked.
+    def respond_stream(self, text: str):
+        """
+        Send `text` to Gemini and hand out E.V.E.'s reply one sentence at a time.
+
+        This is a "generator": instead of returning once, it `yield`s each
+        sentence as soon as it's ready, and whoever is looping over it gets
+        that sentence straight away.
+        """
+        message = types.Content(role="user", parts=[types.Part(text=text)])
+        said = []   # every sentence handed out, to remember at the end
+        try:
+            try:
+                for sentence in self._sentences(message, MODES[self.mode]):
+                    said.append(sentence)
+                    yield sentence
+            except (errors.APIError, httpx.TimeoutException) as error:
+                # Think model busy or too slow? Answer with the fast one
+                # instead, if we haven't started speaking yet.
+                busy = isinstance(error, httpx.TimeoutException) or error.code in BUSY_CODES
+                if self.mode == "think" and busy and not said:
+                    reason = "too slow" if isinstance(error, httpx.TimeoutException) else f"busy, {error.code}"
+                    self.on_note(f"Think model {reason}: using fast model")
+                    for sentence in self._sentences(message, MODES["fast"]):
+                        said.append(sentence)
+                        yield sentence
+                else:
+                    raise
+            if not said:
+                said.append("I'm afraid I drew a blank there, sir.")
+                yield said[-1]
+        finally:
+            # "finally" runs however this ends: finished, failed, or cut short
+            # because you talked over her. She remembers whatever she said.
+            if said:
+                self._remember(message, " ".join(said))
+
+    def _sentences(self, message: types.Content, mode: Mode):
+        """Ask Gemini, and yield the reply as clean, speakable sentences."""
+        config = types.GenerateContentConfig(
+            system_instruction=self.personality,
+            max_output_tokens=MAX_REPLY_TOKENS,
+            thinking_config=types.ThinkingConfig(thinking_level=mode.thinking),
+            http_options=types.HttpOptions(timeout=mode.timeout * 1000),   # milliseconds
+        )
+        contents = self.history + [message]
+        if mode.stream:
+            # The reply arrives in "chunks" of a few words each.
+            chunks = self.client.models.generate_content_stream(
+                model=mode.model, contents=contents, config=config)
+            pieces = (chunk.text or "" for chunk in chunks)
+        else:
+            # Wait for the whole reply, then treat it as a single chunk.
+            response = self.client.models.generate_content(
+                model=mode.model, contents=contents, config=config)
+            pieces = [response.text or ""]
+        for sentence in split_sentences(pieces):
+            sentence = clean_for_speech(sentence)
+            if sentence:
+                yield sentence
+
+    def _remember(self, message: types.Content, reply: str) -> None:
         self.history.append(message)
         self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         # Each exchange is 2 messages; keep only the most recent ones.
         self.history = self.history[-MAX_EXCHANGES * 2:]
-        return reply
 
     def forget(self) -> None:
         """Wipe the conversation memory (a fresh start)."""
         self.history.clear()
+
+
+# --- Text helpers -----------------------------------------------------------
+
+# A sentence ends at . ! or ? followed by a space, or at a line break.
+SENTENCE_END = re.compile(r"(?<=[.!?])\s+|\n+")
+MIN_SENTENCE_CHARS = 20   # shorter bits ("Ah." / "Yes, sir.") are joined to the next one
+
+
+def split_sentences(pieces):
+    """
+    Turn a stream of text pieces ("Hello the", "re, sir. How", " are you?")
+    into whole sentences ("Hello there, sir.", "How are you?"), handing
+    each one out as soon as it's complete.
+    """
+    buffer = ""
+    for piece in pieces:
+        buffer += piece
+        # Cut off every complete sentence at the front of the buffer.
+        while True:
+            match = SENTENCE_END.search(buffer)
+            if not match:
+                break
+            sentence = buffer[:match.start()].strip()
+            # Too short? Leave it in the buffer and wait for the next sentence.
+            # (A line break always counts, so bullet points don't run together.)
+            if len(sentence) < MIN_SENTENCE_CHARS and "\n" not in match.group():
+                next_match = SENTENCE_END.search(buffer, match.end())
+                if not next_match:
+                    break
+                match = next_match
+                sentence = buffer[:match.start()].strip()
+            buffer = buffer[match.end():]
+            if sentence:
+                yield sentence
+    if buffer.strip():
+        yield buffer.strip()   # whatever is left when the reply ends
 
 
 def clean_for_speech(text: str) -> str:
