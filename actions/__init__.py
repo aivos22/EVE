@@ -10,6 +10,8 @@ To add a new tool later:
   2. add it to TOOLS below, and give it a log label in LABELS
 """
 
+import logging
+
 from actions.weather import get_weather
 from actions.web_search import search_web
 from actions.wikipedia import look_up_wikipedia
@@ -44,4 +46,7 @@ def run_tool(name: str, args: dict) -> dict:
     try:
         return tool(**args)
     except Exception as error:   # no internet, website down, odd answer...
+        # The diary (data/logs/) gets one line with the error type and message,
+        # which says whether it was the internet, the website, or our code.
+        logging.getLogger("eve").warning(f"Tool {name}({args}) failed: {error!r}")
         return {"error": f"{name} failed: {type(error).__name__}: {error}"[:200]}

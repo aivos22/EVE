@@ -20,6 +20,7 @@ freezes. The controller never touches the window directly. It only
 sends out signals, and main.py connects those to the HUD.
 """
 
+import logging
 import queue
 import threading
 import wave
@@ -29,6 +30,9 @@ from PySide6.QtCore import QObject, Signal
 from ui.eye_state import EyeState
 from voice.stt import SpeechToText
 from voice.tts import TextToSpeech
+
+# The diary (data/logs/), for full details of problems. See log_file.py.
+diary = logging.getLogger("eve")
 
 READY_AHEAD = 3   # how many sentences the maker may get ready before she says them
 # What she says when the brain can't be reached. It's made once at start-up
@@ -167,6 +171,7 @@ class VoiceController(QObject):
                 job()
             except Exception as error:   # keep the thread alive whatever happens
                 self.log.emit(f"Error: {error}", "VOICE")
+                diary.exception("Voice job failed")   # full details, for the diary file
                 self._back_to_idle()
 
     def _load(self) -> None:
@@ -197,6 +202,7 @@ class VoiceController(QObject):
         except Exception as error:   # e.g. no API key in .env
             self._brain_problem = str(error)
             self.log.emit(f"Brain off: {error}", "BRAIN")
+            diary.warning(f"Brain could not start: {error}")
             return
         self.brain.on_note = lambda note: self.log.emit(note, "BRAIN")
         self.brain.on_tool = self._tool_update
@@ -245,6 +251,8 @@ class VoiceController(QObject):
             # No internet, bad key, Gemini down... Log the reason, then say the
             # saved line instead (unless you've already talked over her).
             self.log.emit(f"Can't reach Gemini: {failure}", "BRAIN")
+            # The diary gets the original technical error too, for working out why.
+            diary.warning(f"Brain failed: {failure} ({failure.__cause__!r})")
             if not self._cancel.is_set():
                 failure = self._speak([OFFLINE_LINE])
         if failure:

@@ -19,6 +19,7 @@ the first time, so they play instantly afterwards and never use credits twice.
 """
 
 import hashlib
+import logging
 import os
 import wave
 
@@ -114,6 +115,8 @@ class TextToSpeech:
                 self._make(engine, text, path)
             except Exception as error:
                 problems.append(f"{name} failed: {self._short(error)}")
+                logging.getLogger("eve").warning(   # the diary
+                    f"Voice {name} failed: {type(error).__name__}: {self._short(error)}")
                 self._handle_error(engine, error)
                 continue   # try the next voice
             source = name if not problems else f"{name}; {problems[-1]}"
