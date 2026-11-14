@@ -1,4 +1,5 @@
 google-genai
+ddgs
 python-dotenv
 RealtimeSTT
 faster-whisper
