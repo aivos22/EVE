@@ -4,7 +4,7 @@ E.V.E.'s actions: things she can DO, rather than just say.
 Two kinds of tool:
   - look-ups (weather, Wikipedia, web search, memory): Gemini reads the
     result and puts it into words
-  - actions (open apps, websites and files, timers, volume and media): these do something on the PC,
+  - actions (open and close apps, open websites and files, timers, volume and media): these do something on the PC,
     and only from an allowlist (data/actions.json), never a free-form command
 
 Each one is a plain Python function with a docstring explaining what it's
@@ -32,6 +32,7 @@ import logging
 
 from actions import settings
 from actions.apps import open_app
+from actions.close import close_app
 from actions.files import find_files, list_folder, open_file
 from actions.media import change_volume, control_media
 from actions.memory_tools import forget_about_sir, remember_about_sir
@@ -44,7 +45,7 @@ from actions.websites import open_website
 from actions.wikipedia import look_up_wikipedia
 
 TOOLS = [get_weather, look_up_wikipedia, search_web, remember_about_sir, forget_about_sir,
-         open_app, open_website, set_timer, cancel_timer, list_timers,
+         open_app, close_app, open_website, set_timer, cancel_timer, list_timers,
          change_volume, control_media, look_at_screen, find_files, list_folder, open_file]
 _BY_NAME = {tool.__name__: tool for tool in TOOLS}
 
@@ -90,6 +91,7 @@ def _timer_line(args: dict) -> str:
 # "Searching YouTube: lo-fi beats", instead of "label: first detail".
 SPECIAL_LINES = {
     "open_app": lambda args: f"Opening {_friendly('apps', args.get('name', ''))}",
+    "close_app": lambda args: f"Closing {_friendly('apps', args.get('name', ''))}",
     "open_website": lambda args: (
         f"Searching {_friendly('websites', args.get('site', ''))}: {args['search']}" if args.get("search")
         else f"Opening {_friendly('websites', args.get('site', ''))}"),

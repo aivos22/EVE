@@ -102,6 +102,26 @@ HOW_TO_FOLDERS = [
     "missing from YOUR screenshots and recordings. Needs a restart of E.V.E.",
 ]
 
+HOW_TO_CLOSE = [
+    "App 'process' = its program file (Task Manager > Details shows them), so she can",
+    "close it, e.g. \"process\": [\"Spotify.exe\"]. No process line = she can't close it.",
+    "She closes apps politely, like clicking X, so unsaved work still asks you first.",
+]
+
+# The program files of common apps, so "close Spotify" works without you
+# having to look them up. Added to apps in your file that have no "process"
+# line yet (only for these names; lines you've written are never changed).
+# File Explorer, Task Manager and Settings are listed so she knows to say
+# she won't close them (see actions/close.py).
+KNOWN_PROCESSES = {
+    "Notepad": ["Notepad.exe"], "Calculator": ["CalculatorApp.exe"], "Paint": ["mspaint.exe"],
+    "File Explorer": ["explorer.exe"], "Task Manager": ["Taskmgr.exe"],
+    "Settings": ["SystemSettings.exe"], "Spotify": ["Spotify.exe"], "VS Code": ["Code.exe"],
+    "Edge": ["msedge.exe"], "Chrome": ["chrome.exe"], "Discord": ["Discord.exe"],
+    "Epic Games": ["EpicGamesLauncher.exe"], "Fortnite": ["FortniteClient-Win64-Shipping.exe"],
+    "Minecraft Launcher": ["Minecraft.exe"],
+}
+
 # Windows' own IDs for its special folders, so we find them wherever they really are.
 KNOWN_FOLDERS = {
     "Documents": ("FDD39AD0-238F-46AF-ADB4-6C85480369C7", ["my documents", "docs"]),
@@ -145,7 +165,10 @@ def load() -> dict:
     in wrongly, so one typo doesn't switch everything off.
     """
     if not SETTINGS_FILE.exists():
-        first = dict(DEFAULTS, _how_to=DEFAULTS["_how_to"] + HOW_TO_FOLDERS, folders=_default_folders())
+        first = dict(DEFAULTS, _how_to=DEFAULTS["_how_to"] + HOW_TO_FOLDERS + HOW_TO_CLOSE,
+                     folders=_default_folders())
+        for name, app in first["apps"].items():
+            app["process"] = list(KNOWN_PROCESSES.get(name, []))
         SETTINGS_FILE.write_text(json.dumps(first, indent=2, ensure_ascii=False), encoding="utf-8")
     try:
         # "utf-8-sig" also accepts the invisible marker (a "BOM") that some
@@ -163,6 +186,8 @@ def load() -> dict:
 
     problems = []
     apps = _entries(raw, "apps", "open", problems)
+    for name, app in apps.items():
+        app["process"] = _processes(name, app.get("process", []), problems)
     websites = _entries(raw, "websites", "url", problems)
     folders = _entries(raw, "folders", "path", problems)
     for name, folder in list(folders.items()):
@@ -194,6 +219,11 @@ def _add_new_sections(raw: dict) -> None:
     the defaults, and are saved again. Everything already in the file stays.
     """
     added = False
+    # Program files for close_app, for known apps that don't have one yet.
+    for name, app in (raw.get("apps") or {}).items():
+        if isinstance(app, dict) and "process" not in app and name in KNOWN_PROCESSES:
+            app["process"] = list(KNOWN_PROCESSES[name])
+            added = True
     if "folders" not in raw:
         raw["folders"] = _default_folders()
         added = True
@@ -202,8 +232,26 @@ def _add_new_sections(raw: dict) -> None:
         added = True
     if added:
         if isinstance(raw.get("_how_to"), list):
-            raw["_how_to"] += [line for line in HOW_TO_FOLDERS if line not in raw["_how_to"]]
+            raw["_how_to"] += [line for line in HOW_TO_FOLDERS + HOW_TO_CLOSE if line not in raw["_how_to"]]
         SETTINGS_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _processes(app: str, value, problems: list) -> list[str]:
+    """An app's "process" line as a list of program file names, e.g. ["Spotify.exe"]."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        problems.append(f'app {app}: process should be like ["Spotify.exe"]')
+        return []
+    good = []
+    for program in value:
+        # Only a program file name ending in .exe: never a folder path or a command.
+        if isinstance(program, str) and program.strip().lower().endswith(".exe") \
+                and not re.search(r"[\\/:]", program):
+            good.append(program.strip())
+        else:
+            problems.append(f"app {app}: process {program!r} should be a program file name like Spotify.exe")
+    return good
 
 
 def _default_folders() -> dict:

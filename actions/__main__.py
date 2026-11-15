@@ -7,6 +7,7 @@ Try one of E.V.E.'s tools on its own, with no brain, HUD or voice.
     .venv\\Scripts\\python -m actions search best pizza in Rome
     .venv\\Scripts\\python -m actions news Formula 1
     .venv\\Scripts\\python -m actions open_app spotify
+    .venv\\Scripts\\python -m actions close notepad
     .venv\\Scripts\\python -m actions open_site youtube
     .venv\\Scripts\\python -m actions search_site youtube lo-fi beats
     .venv\\Scripts\\python -m actions timer 5 pasta      (5 seconds; waits for it)
@@ -40,6 +41,7 @@ SHORTCUTS = {
     "search": ("search_web", "query", {}),
     "news": ("search_web", "query", {"recent_news": True}),
     "open_app": ("open_app", "name", {}),
+    "close": ("close_app", "name", {}),
     "open_site": ("open_website", "site", {}),
     "search_site": ("open_website", "site", {}),   # first word = site, the rest = search
     "timer": ("set_timer", "seconds", {}),         # first word = seconds, the rest = label
