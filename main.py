@@ -4,12 +4,14 @@ import sys
 from dotenv import load_dotenv
 from PySide6.QtWidgets import QApplication
 
+from actions import screen
 from actions.timers import get_timers
 from log_file import log_line, start_log_file
 from paths import BASE_DIR
 from ui.event_log import EventLog
 from ui.eye_animator import EyeAnimator
 from ui.hud_window import HudWindow
+from ui.tray_icon import TrayIcon
 from voice.voice_controller import VoiceController
 
 load_dotenv(BASE_DIR / ".env")
@@ -17,6 +19,10 @@ load_dotenv(BASE_DIR / ".env")
 
 def main():
     app = QApplication(sys.argv)
+    # Normally Qt ends the program when its last window goes. Hiding the HUD
+    # must NOT end E.V.E., so we turn that off; the shutdown (X, POWER, Esc,
+    # "Eve, shut down" or Quit in the tray) ends her instead.
+    app.setQuitOnLastWindowClosed(False)
     diary = start_log_file()   # data/logs/eve_<today>.txt
 
     key_ok = "yes" if os.getenv("GEMINI_API_KEY") else "NO"
@@ -52,6 +58,23 @@ def main():
     voice.wake_changed.connect(window.show_wake)
     # Voice -> window: "Eve, shut down" plays the same shutdown as Esc.
     voice.shutdown_requested.connect(window.shutdown)
+    # Voice -> window: "Eve, hide" / "Eve, show yourself" (she keeps running when hidden).
+    voice.hide_requested.connect(window.hide_hud)
+    voice.show_requested.connect(window.show_hud)
+
+    # The tray icon (by the clock): the way back after hiding the display.
+    tray = TrayIcon()
+    tray.toggle_requested.connect(window.toggle_hud)
+    tray.wake_toggle_requested.connect(voice.toggle_wake)
+    # Quit from the tray: show her first, so the shutdown animation can be seen.
+    tray.quit_requested.connect(lambda: (window.show_hud(), window.shutdown()))
+    window.visibility_changed.connect(tray.display_changed)
+    voice.wake_changed.connect(tray.wake_changed)
+    app.aboutToQuit.connect(tray.hide)
+    if tray.available():
+        tray.show()
+    else:
+        log_line("No system tray on this PC: say \"Eve, show yourself\" to bring the display back")
     # Voice -> eye: listening / thinking / speaking / idle, and the speaking pulse.
     voice.state.connect(animator.set_state)
     voice.level.connect(animator.set_audio_level)
@@ -69,6 +92,9 @@ def main():
     app.aboutToQuit.connect(lambda: log_line("=== E.V.E. closed ==="))
 
     window.show()
+    # look_at_screen looks at whichever monitor the HUD is on, so it needs
+    # the HUD's window ID (and may hide the HUD from screenshots).
+    screen.use_window(int(window.winId()))
     sys.exit(app.exec())
 
 

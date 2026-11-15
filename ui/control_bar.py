@@ -7,6 +7,11 @@ Each button sends the same signal as its keyboard shortcut, so the rest
 of E.V.E. doesn't know (or care) whether you clicked or pressed a key.
 The keys still work: Space, /, M, W, Esc.
 
+When the HUD is made narrow, the buttons switch to short labels
+(set_compact), so they still fit:
+
+    [ 🎙 ]  [ ⌨ ]  [ FAST ]  [ 👂 ON ]  [ ⏻ ]
+
 This file only draws the buttons and reports clicks. hud_window.py
 connects them up.
 """
@@ -79,6 +84,9 @@ class ControlBar(QWidget):
         # MODE and WAKE are greyed out until the voice says what they are.
         self.mode.setEnabled(False)
         self.wake.setEnabled(False)
+        self._compact = False
+        self._mode_word = "—"   # "FAST" / "THINK"
+        self._wake_word = "—"   # "ON" / "OFF"
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 6, 0, 0)
@@ -103,9 +111,40 @@ class ControlBar(QWidget):
 
     def show_mode(self, mode: str) -> None:
         """e.g. "FAST" -> the button reads MODE: FAST."""
-        self.mode.setText(f"MODE: {mode}")
+        self._mode_word = mode
         self.mode.setEnabled(True)
+        self._label()
 
     def show_wake(self, on: bool) -> None:
-        self.wake.setText("WAKE: ON" if on else "WAKE: OFF")
+        self._wake_word = "ON" if on else "OFF"
         self.wake.setEnabled(True)
+        self._label()
+
+    def set_compact(self, compact: bool) -> None:
+        """Short labels (True) for a narrow HUD, or the full ones (False)."""
+        if compact != self._compact:
+            self._compact = compact
+            self._label()
+
+    def _label(self) -> None:
+        """Write each button's text, short or full."""
+        if self._compact:
+            texts = ["🎙", "⌨", self._mode_word, f"👂 {self._wake_word}", "⏻"]
+        else:
+            texts = ["🎙  TALK", "⌨  TYPE", f"MODE: {self._mode_word}", f"WAKE: {self._wake_word}", "⏻  POWER"]
+        for button, text in zip((self.talk, self.type, self.mode, self.wake, self.power), texts):
+            button.setText(text)
+
+    def width_needed(self, compact: bool) -> int:
+        """
+        How wide the row of buttons needs to be with short or full labels.
+        Measured with the LONGEST words ("THINK", "OFF"), so the answer never
+        changes when the mode does and the HUD doesn't jump between layouts.
+        """
+        was = (self._compact, self._mode_word, self._wake_word)
+        self._compact, self._mode_word, self._wake_word = compact, "THINK", "OFF"
+        self._label()
+        width = self.minimumSizeHint().width()
+        self._compact, self._mode_word, self._wake_word = was
+        self._label()
+        return width

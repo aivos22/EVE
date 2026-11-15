@@ -98,6 +98,8 @@ class VoiceController(QObject):
     mode_changed = Signal(str) # the brain's mode label, "FAST" or "THINK"
     wake_changed = Signal(bool)    # wake word switched on (True) or off (False)
     shutdown_requested = Signal()  # "Eve, shut down": the window should close
+    hide_requested = Signal()      # "Eve, hide": take the display off screen (she keeps running)
+    show_requested = Signal()      # "Eve, show yourself": bring the display back
     timer_done = Signal(str)   # a timer went off, e.g. "pasta timer": the eye should flash
 
     def __init__(self, timers=None, parent=None):
@@ -482,6 +484,16 @@ class VoiceController(QObject):
             self.log.emit("Shutdown requested", "VOICE")
             self._speak([wake_words.SHUTDOWN_REPLY])
             self.shutdown_requested.emit()
+            return
+        if wake_words.wants_hide(text):
+            self.log.emit("Hiding the display", "VOICE")
+            self.hide_requested.emit()   # (signals reach the window safely from this thread)
+            self._speak([wake_words.HIDE_REPLY])
+            return
+        if wake_words.wants_show(text):
+            self.log.emit("Showing the display", "VOICE")
+            self.show_requested.emit()
+            self._speak([wake_words.SHOW_REPLY])
             return
         if wake_words.wants_sleep(text):
             self._speak([wake_words.SLEEP_REPLY])   # no follow-up window: she's done

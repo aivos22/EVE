@@ -45,7 +45,7 @@ class EyeWidget(QWidget):
         self.animator = animator
         # Every time the animator updates its numbers, ask Qt to repaint us.
         animator.updated.connect(self.update)
-        self.setMinimumSize(300, 300)
+        self.setMinimumSize(200, 200)   # it grows to fill the window when the HUD is resized
 
     def paintEvent(self, event):
         # Qt calls this whenever the widget needs drawing.
