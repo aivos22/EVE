@@ -16,12 +16,16 @@ from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWi
 from ui import theme
 from ui.boot_sequence import BootSequence, ShutdownSequence
 from ui.command_box import CommandBox
+from ui.control_bar import ControlBar
 from ui.event_log import EventLog
 from ui.eye_animator import EyeAnimator
 from ui.eye_state import STATE_KEYS, EyeState
 from ui.eye_widget import EyeWidget
 from ui.side_panel import ClockPanel, SystemPanel
+from ui.timer_panel import TimerPanel
 from ui.typewriter import Typewriter
+
+TEST_TIMER_SECONDS = 10   # the T key starts a timer this long
 
 # What the log feed says when E.V.E. enters each state.
 STATE_MESSAGES = {
@@ -38,19 +42,26 @@ class HudWindow(QWidget):
     talk_pressed = Signal()
     talk_released = Signal()
     mode_toggle_pressed = Signal()   # M key: switch the brain between fast and think
+    wake_toggle_pressed = Signal()   # W key: switch the wake word ("Eve") on or off
     text_submitted = Signal(str)     # a message typed in the command bar (/ key)
 
-    def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None):
+    def __init__(self, animator: EyeAnimator | None = None, event_log: EventLog | None = None,
+                 timers=None):
         super().__init__()
         # Use the animator and log we were given, or make our own for testing.
         self.animator = animator or EyeAnimator(self)
         self.event_log = event_log or EventLog(self)
+        if timers is None:
+            from actions.timers import get_timers
+            timers = get_timers()
+        self.timers = timers   # the timer keeper; the TIMERS panel shows what it holds
         self._drag_offset: QPoint | None = None
         self._booted = False
         self._you_said = ""   # caption text
         self._eve_said = ""   # as much of her sentence as has been typed so far
         self._eve_rest = ""   # the part not typed yet (drawn invisibly, to hold its place)
         self._mode = ""       # the brain's mode, shown after the status, e.g. "FAST"
+        self._wake = ""       # "ON" / "OFF" for the wake word, or "" before she's loaded
         # Types her sentences out letter by letter (see ui/typewriter.py).
         self.typewriter = Typewriter(self)
         self.typewriter.text_changed.connect(self._on_typed)
@@ -84,6 +95,7 @@ class HudWindow(QWidget):
         # Side panels: clock on the left, system stats on the right.
         self.clock_panel = ClockPanel()
         self.system_panel = SystemPanel()
+        self.timer_panel = TimerPanel(self.timers)   # hides itself when no timers run
 
         self.eye = EyeWidget(self.animator)
 
@@ -113,16 +125,29 @@ class HudWindow(QWidget):
         self.log_label.setFixedHeight(105)
         self.log_label.setStyleSheet(f"color: {theme.TEXT.name()}; background: transparent;")
 
+        # The on-screen buttons. They send exactly the same signals as the keys.
+        self.controls = ControlBar()
+        self.controls.talk_pressed.connect(self.talk_pressed)
+        self.controls.talk_released.connect(self.talk_released)
+        self.controls.type_clicked.connect(self.command_box.open)
+        self.controls.mode_clicked.connect(self.mode_toggle_pressed)
+        self.controls.wake_clicked.connect(self.wake_toggle_pressed)
+        self.controls.power_clicked.connect(self.shutdown)
+
         centre = QVBoxLayout()
         centre.addWidget(self.eye, stretch=1)
         centre.addWidget(self.caption_label)
         centre.addWidget(self.command_box)
         centre.addWidget(self.log_label)
         centre.addWidget(self.status_label)
+        centre.addWidget(self.controls)
 
         row = QHBoxLayout()
         row.setSpacing(16)
-        row.addLayout(self._column(self.clock_panel))
+        # Left column: the clock in the middle, timers (when there are any) at the bottom.
+        left = self._column(self.clock_panel)
+        left.addWidget(self.timer_panel)
+        row.addLayout(left)
         row.addLayout(centre, stretch=1)
         row.addLayout(self._column(self.system_panel))
 
@@ -183,12 +208,21 @@ class HudWindow(QWidget):
                 f'<span style="color:{colour.name()}">{word}</span>')
         if self._mode:
             text += f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;MODE // {self._mode}</span>'
+        if self._wake:
+            text += f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;WAKE // {self._wake}</span>'
         self.status_label.setText(text)
 
     def show_mode(self, mode: str) -> None:
         """Show the brain's mode (e.g. "FAST" or "THINK") next to the status."""
         self._mode = mode
         self._show_state(self.animator.state)
+        self.controls.show_mode(mode)
+
+    def show_wake(self, on: bool) -> None:
+        """Show whether she's listening for her name: WAKE // ON or OFF."""
+        self._wake = "ON" if on else "OFF"
+        self._show_state(self.animator.state)
+        self.controls.show_wake(on)
 
     def show_caption(self, who: str, text: str) -> None:
         """
@@ -290,8 +324,13 @@ class HudWindow(QWidget):
             self._log_state(STATE_KEYS[key])
         elif key == "b":
             self.boot.start()  # replay the whole startup, text and all
+        elif key == "t":
+            self.timers.add(TEST_TIMER_SECONDS, "test")   # try the countdown and announcement
+            self.event_log.log(f"Test timer: {TEST_TIMER_SECONDS} seconds", "TIMER")
         elif key == "m":
             self.mode_toggle_pressed.emit()
+        elif key == "w":
+            self.wake_toggle_pressed.emit()
         elif key == "/":
             self.command_box.open()   # from now, typing goes into the box
         elif event.key() == Qt.Key_Escape:

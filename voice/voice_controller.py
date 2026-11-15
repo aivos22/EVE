@@ -4,6 +4,15 @@ The voice "conductor": joins hearing, thinking and speaking together.
     Space down  -> start recording
     Space up    -> transcribe -> ask the brain (or echo) -> speak the reply
 
+Or, with the wake word on, just say "Eve, ..." (see voice/wake_words.py).
+A third thread (the "listener") waits for speech while she's idle, and
+only passes on what was said to her by name. After she answers, she
+listens for a follow-up for FOLLOW_UP_SECONDS without needing her name.
+
+When a timer goes off (actions/timers.py), she says so: "Sir, your pasta
+timer is done." The announcement joins the same queue as her replies, so
+if she's in the middle of saying something, it waits until she's finished.
+
 Her reply is spoken sentence by sentence, like an assembly line:
 
     brain:    [sentence 1][sentence 2][sentence 3]
@@ -21,8 +30,10 @@ sends out signals, and main.py connects those to the HUD.
 """
 
 import logging
+import os
 import queue
 import threading
+import time
 import wave
 
 from PySide6.QtCore import QObject, Signal
@@ -31,6 +42,7 @@ from ui.eye_state import EyeState
 from voice.microphone import check_microphone
 from voice.stt import SpeechToText
 from voice.tts import TextToSpeech
+from voice import wake_words
 
 # The diary (data/logs/), for full details of problems. See log_file.py.
 diary = logging.getLogger("eve")
@@ -41,6 +53,12 @@ READY_AHEAD = 3   # how many sentences the maker may get ready before she says t
 OFFLINE_LINE = "I can't reach my systems right now, sir."
 # What she says at start-up if she has no microphone.
 NO_MIC_LINE = "I can't hear you at the moment, sir. Press slash to type to me instead."
+# After she answers someone who used her name, how long she keeps listening
+# for another question without needing to hear "Eve" again.
+FOLLOW_UP_SECONDS = 8
+# How long she waits after she stops talking before listening again, so the
+# last echo of her own voice from the speakers isn't picked up.
+QUIET_AFTER_SPEAKING = 0.6
 
 
 class BrainError(Exception):
@@ -78,9 +96,18 @@ class VoiceController(QObject):
     state = Signal(EyeState)   # what the eye should be doing
     level = Signal(float)      # her voice loudness 0-1, many times a second while speaking
     mode_changed = Signal(str) # the brain's mode label, "FAST" or "THINK"
+    wake_changed = Signal(bool)    # wake word switched on (True) or off (False)
+    shutdown_requested = Signal()  # "Eve, shut down": the window should close
+    timer_done = Signal(str)   # a timer went off, e.g. "pasta timer": the eye should flash
 
-    def __init__(self, parent=None):
+    def __init__(self, timers=None, parent=None):
+        """`timers` is the timer keeper (actions/timers.py), if there is one."""
         super().__init__(parent)
+        if timers is not None:
+            # Called on the timer keeper's own thread. All we do there is send
+            # a signal and add a job to the queue, both safe from any thread.
+            timers.when_set(self._timer_set)
+            timers.when_done(self._timer_went_off)
         self.stt: SpeechToText | None = None
         self.tts: TextToSpeech | None = None
         self._get_brain = find_brain()
@@ -92,16 +119,27 @@ class VoiceController(QObject):
         self._jobs: queue.Queue = queue.Queue()
         self._worker = threading.Thread(target=self._run_jobs, daemon=True)
         self._cancel = threading.Event()   # set = "stop the current reply now"
+        # Wake word: on unless EVE_WAKE_WORD=off in .env. W switches it.
+        self.wake_on = os.getenv("EVE_WAKE_WORD", "on").strip().lower() not in ("off", "no", "false", "0")
+        self._listener = threading.Thread(target=self._listen_for_wake, daemon=True)
+        self._stop_overhearing = threading.Event()  # set = "stop listening for her name now"
+        self._closing = threading.Event()
+        self._idle_since = 0.0     # when she last went idle (time.time())
+        self._awake_until = 0.0    # listening without her name until this time
+        self._follow_up = False    # True = open the follow-up window after this reply
 
     # --- Starting and stopping ------------------------------------------
 
     def start(self) -> None:
         """Start the background thread and load the speech models on it."""
         self._worker.start()
+        self._listener.start()
         self._jobs.put(self._load)
 
     def shutdown(self) -> None:
         """Called when E.V.E. closes: stop talking and free the microphone."""
+        self._closing.set()
+        self._stop_overhearing.set()
         self._cancel.set()
         if self.tts:
             self.tts.stop()
@@ -130,6 +168,10 @@ class VoiceController(QObject):
             self._cancel.set()
             self.tts.stop()
         self.status = "recording"
+        self._follow_up = False
+        self._awake_until = 0.0
+        # If the listener is waiting for her name, make it let go of the mic first.
+        self.stt.stop_listening(self._stop_overhearing)
         self.stt.start()
         self.state.emit(EyeState.LISTENING)
         self.caption.emit("you", "")
@@ -157,6 +199,9 @@ class VoiceController(QObject):
             self._cancel.set()   # a new message interrupts her, like talking over her
             self.tts.stop()
         self.status = "working"
+        self._stop_overhearing.set()   # so she doesn't record her own reply
+        self._follow_up = False
+        self._awake_until = 0.0
         self.state.emit(EyeState.THINKING)
         self.caption.emit("you", text)
         self.log.emit(f"Typed: {text}", "TEXT")
@@ -171,6 +216,18 @@ class VoiceController(QObject):
         self.brain.toggle_mode()
         self.log.emit(f"Switched to {self.brain.describe()}", "BRAIN")
         self.mode_changed.emit(self.brain.mode.upper())
+
+    def toggle_wake(self) -> None:
+        """Switch the wake word on or off (W key)."""
+        self.wake_on = not self.wake_on
+        if not self.wake_on:
+            self._stop_overhearing.set()
+            self._awake_until = 0.0
+        if self.wake_on:
+            self.log.emit('Wake word on: say "Eve"', "VOICE")
+        else:
+            self.log.emit("Wake word off: hold Space to talk", "VOICE")
+        self.wake_changed.emit(self.wake_on)
 
     # --- Work done on the background thread -----------------------------
 
@@ -214,7 +271,7 @@ class VoiceController(QObject):
         if problem is None:
             self.log.emit("Loading speech models...", "VOICE")
             try:
-                self.stt = SpeechToText(on_live_text=lambda text: self.caption.emit("you", text))
+                self.stt = SpeechToText(on_live_text=self._live_caption)
                 self._mic_problem = ""
                 return True
             except Exception as error:
@@ -226,20 +283,32 @@ class VoiceController(QObject):
         diary.warning(f"No hearing: {problem}")
         return False
 
+    def _live_caption(self, text: str) -> None:
+        """The rough "so far" text while someone talks. Only shown if it's for her,
+        so chatter in the room doesn't appear while she waits for her name."""
+        if self.status == "recording" or self._awake_until > time.time():
+            self.caption.emit("you", text)
+
     def _finish_loading(self) -> None:
         """Stock phrases, then the "ready" message."""
+        # Make her stock phrases now, while we're probably online, so they're
+        # saved in the cache: instant to say, and they work with no internet.
+        from actions.timers import announcement_for
+        lines = [wake_words.WAKE_REPLY, wake_words.SLEEP_REPLY, wake_words.SHUTDOWN_REPLY,
+                 announcement_for("")]   # "Sir, your timer is done."
         if self._get_brain:
-            # Make her stock phrases now, while we're probably online, so they're
-            # saved in the cache: instant to say, and they work with no internet.
             from brain.gemini_brain import FRESH_START_REPLY
-            for line in (OFFLINE_LINE, FRESH_START_REPLY):
-                try:
-                    self.tts.prepare(line)
-                except Exception:
-                    pass   # not worth failing start-up over; she'll try again when needed
+            lines += [OFFLINE_LINE, FRESH_START_REPLY]
+        for line in lines:
+            try:
+                self.tts.prepare(line)
+            except Exception:
+                pass   # not worth failing start-up over; she'll try again when needed
         mode = "brain connected" if self.brain else "echo mode" if not self._get_brain else "brain offline"
+        self.wake_changed.emit(self.wake_on)
         if self.stt:
-            self.log.emit(f"Ready, {mode}. Hold Space to talk", "VOICE")
+            how = 'Say "Eve" or hold Space' if self.wake_on else "Hold Space to talk"
+            self.log.emit(f"Ready, {mode}. {how}", "VOICE")
             return
         # No hearing: say so out loud once, and point to the command bar.
         self.log.emit(f"Ready, {mode}. Typing only: press /", "VOICE")
@@ -297,8 +366,131 @@ class VoiceController(QObject):
         self.log.emit(f"Heard: {text}", "VOICE")
         self._reply_to(text)
 
-    def _reply_to(self, text: str) -> None:
-        """Get the brain's reply and speak it. If the brain fails, say so politely."""
+    # --- The wake word (runs on the listener thread) -----------------------
+
+    def _can_overhear(self) -> bool:
+        """True when the listener may wait for her name: wake word on, she can
+        hear, she's idle, and she finished talking a moment ago."""
+        return (self.wake_on and self.stt is not None and self.status == "idle"
+                and not self._closing.is_set()
+                and time.time() - self._idle_since >= QUIET_AFTER_SPEAKING)
+
+    def _listen_for_wake(self) -> None:
+        """
+        The listener thread. While she's idle, wait for someone to say
+        something, then decide if it was for her:
+          - in the follow-up window: everything counts
+          - otherwise: only if it starts or ends with her name
+        """
+        while not self._closing.is_set():
+            if not self._can_overhear():
+                time.sleep(0.1)
+                continue
+            self._stop_overhearing.clear()
+            if not self._can_overhear():
+                continue   # something started in that instant; check again
+            awake = self._awake_until > time.time()
+            try:
+                text = self.stt.listen_for_phrase(
+                    self._stop_overhearing, until=self._awake_until if awake else None)
+            except Exception:
+                if self._closing.is_set():
+                    return
+                diary.exception("Listening for the wake word failed")
+                time.sleep(1)
+                continue
+            if self._stop_overhearing.is_set() or self.status != "idle":
+                continue   # Space, typing or closing took over; ignore what was heard
+            if not text:
+                if awake and time.time() >= self._awake_until:
+                    # Nobody asked a follow-up: back to waiting for her name.
+                    self._awake_until = 0.0
+                    self.caption.emit("you", "")
+                    self.state.emit(EyeState.IDLE)
+                continue
+            in_window = awake and self.stt.last_phrase_started <= self._awake_until
+            request = wake_words.split_wake(text)
+            if request is None:
+                if not in_window:
+                    diary.debug(f"Overheard (not for her): {text}")
+                    continue
+                request = text   # a follow-up doesn't need her name
+            self._awake_until = 0.0
+            # It's for her: from here it's the same path as push-to-talk.
+            self.status = "working"
+            self.state.emit(EyeState.THINKING)
+            self.caption.emit("you", text)
+            self.log.emit(f"Heard: {text}", "VOICE")
+            self._jobs.put(lambda r=request: self._reply_to(r, by_name=True))
+
+    # --- Timers (called on the timer keeper's thread) ----------------------
+
+    def _timer_set(self, timer) -> None:
+        """
+        A timer was just set. Get its announcement ready NOW, while we're
+        probably online, so it's saved in the phrase cache: instant when the
+        timer goes off, even with no internet. It's a queued job, so it never
+        holds up what she's saying.
+        """
+        text = timer.announcement()
+
+        def prepare() -> None:
+            if self.tts:
+                try:
+                    self.tts.prepare(text)
+                except Exception:
+                    pass   # it'll be made when needed instead
+        self._jobs.put(prepare)
+
+    def _timer_went_off(self, timer) -> None:
+        """Flash the eye and log it straight away; say it when she's free."""
+        self.timer_done.emit(timer.name())
+        self.log.emit(f"{timer.name().capitalize()} done", "TIMER")
+        self._jobs.put(lambda: self._announce(timer.announcement()))
+
+    def _announce(self, text: str) -> None:
+        """
+        Say a timer announcement (on the worker thread). Because it's a job,
+        it only starts once she's finished whatever she was saying.
+        """
+        if self._closing.is_set():
+            return
+        # Sir is holding Space and talking: don't talk over him.
+        while self.status == "recording" and not self._closing.is_set():
+            time.sleep(0.1)
+        if self.status == "working":
+            # He's just finished talking, and her answer is queued behind this
+            # job. Go to the back of the queue, so she answers him first.
+            self._jobs.put(lambda: self._announce(text))
+            return
+        self.status = "working"
+        self._stop_overhearing.set()   # so she doesn't hear herself
+        self._follow_up = False        # an announcement doesn't wait for a reply
+        self._awake_until = 0.0
+        self.caption.emit("you", "")
+        self._speak([text])            # goes back to idle by itself when done
+
+    # --- Replying ---------------------------------------------------------
+
+    def _reply_to(self, text: str, by_name: bool = False) -> None:
+        """
+        Get the brain's reply and speak it. If the brain fails, say so politely.
+        `by_name` = she was woken by her name, so she listens for a follow-up after.
+        """
+        # Her own commands first: no brain needed, and they work offline.
+        if wake_words.wants_shutdown(text):
+            self.log.emit("Shutdown requested", "VOICE")
+            self._speak([wake_words.SHUTDOWN_REPLY])
+            self.shutdown_requested.emit()
+            return
+        if wake_words.wants_sleep(text):
+            self._speak([wake_words.SLEEP_REPLY])   # no follow-up window: she's done
+            return
+        self._follow_up = by_name and self.wake_on
+        if not text:
+            # Just her name: she answers and waits for the actual question.
+            self._speak([wake_words.WAKE_REPLY])
+            return
         if self.brain:
             sentences = self.brain.respond_stream(text)
         elif self._get_brain:
@@ -397,5 +589,15 @@ class VoiceController(QObject):
             hand_over(None)
 
     def _back_to_idle(self) -> None:
+        self._idle_since = time.time()
+        if self._follow_up and self.wake_on and self.stt:
+            # She was asked by name: keep listening for a follow-up for a few
+            # seconds (the clock starts after the quiet gap), eye in LISTENING.
+            self._follow_up = False
+            self._awake_until = time.time() + QUIET_AFTER_SPEAKING + FOLLOW_UP_SECONDS
+            self.status = "idle"
+            self.state.emit(EyeState.LISTENING)
+            return
+        self._follow_up = False
         self.status = "idle"
         self.state.emit(EyeState.IDLE)

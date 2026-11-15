@@ -91,6 +91,7 @@ class EyeAnimator(QObject):
         self.look_x = 0.0        # pupil drift, -1 (left) to 1 (right)
         self.look_y = 0.0        # pupil drift, -1 (up) to 1 (down)
         self.blink = 0.0         # 0 = open, 1 = fully shut (mid-blink)
+        self.flash_level = 0.0   # 0 = normal, 1 = flashing brightest (e.g. a timer went off)
 
         self._base_glow = 0.3
         self._time = 0.0                  # seconds since start, for wavy motion
@@ -101,6 +102,7 @@ class EyeAnimator(QObject):
         self._gaze = (0.0, 0.0)           # where the mouse (or later a camera) wants us to look
         self._gaze_fresh_for = 0.0
         self._blink_time = -1.0           # seconds into the current blink, -1 = not blinking
+        self._flash_time = -1.0           # seconds into the current flash, -1 = not flashing
         self._next_blink = random.uniform(3, 6)
 
         # A timer that calls _tick about 60 times a second.
@@ -133,6 +135,10 @@ class EyeAnimator(QObject):
         if self._blink_time < 0:
             self._blink_time = 0.0
 
+    def flash(self) -> None:
+        """Flash brightly three times, to get sir's attention (e.g. a timer is done)."""
+        self._flash_time = 0.0
+
     def set_audio_level(self, level: float) -> None:
         """Feed in the current voice volume (0 to 1) while speaking."""
         self._audio_level = max(0.0, min(1.0, level))
@@ -151,12 +157,13 @@ class EyeAnimator(QObject):
         self._update_pulse(dt)
         self._update_look(dt)
         self._update_blink(dt)
+        self._update_flash(dt)
 
         # Pupil and glow ease towards what the state wants.
         self.pupil_scale = approach(self.pupil_scale, settings["pupil"] + self.pulse * 0.15, 6, dt)
         self._base_glow = approach(self._base_glow, settings["glow"], 3, dt)
         breathing = 0.15 * math.sin(self._time * 1.2)  # slow in-and-out glow
-        self.glow = max(0.0, min(1.0, self._base_glow + breathing + self.pulse * 0.3))
+        self.glow = max(0.0, min(1.0, self._base_glow + breathing + self.pulse * 0.3 + self.flash_level))
 
         self.updated.emit()
 
@@ -237,6 +244,17 @@ class EyeAnimator(QObject):
         else:
             self.blink = 0.0
             self._blink_time = -1.0
+
+    def _update_flash(self, dt: float) -> None:
+        # Three bright pulses, 0.6 seconds each: up and down like a sine wave's hump.
+        if self._flash_time < 0:
+            return
+        self._flash_time += dt
+        if self._flash_time < 3 * 0.6:
+            self.flash_level = abs(math.sin(math.pi * self._flash_time / 0.6))
+        else:
+            self.flash_level = 0.0
+            self._flash_time = -1.0
 
 if __name__ == "__main__":
     # Quick self-test with no window: run  .venv\Scripts\python -m ui.eye_animator
