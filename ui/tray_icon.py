@@ -3,7 +3,7 @@ E.V.E.'s icon in the system tray (the small icons by the clock, bottom-right
 of the taskbar). It's how you get her back after hiding the display.
 
     left-click    show / hide the display
-    right-click   a menu: Show / Hide, Wake word on/off, Quit
+    right-click   a menu: Show / Hide, Mute microphone, Wake word on/off, Quit
 
 Windows sometimes tucks new tray icons behind the little ^ arrow. Drag it
 out onto the taskbar to keep it in view.
@@ -48,6 +48,7 @@ def _eye_icon() -> QIcon:
 class TrayIcon(QObject):
     toggle_requested = Signal()        # show the display if hidden, hide it if showing
     wake_toggle_requested = Signal()   # switch the wake word on / off
+    mute_toggle_requested = Signal()   # mute / unmute the microphone
     quit_requested = Signal()          # shut E.V.E. down completely
 
     def __init__(self, parent=None):
@@ -61,9 +62,14 @@ class TrayIcon(QObject):
         self.wake_action = QAction("Wake word: —", self.menu)
         self.wake_action.setEnabled(False)   # until the voice says whether it's on
         self.wake_action.triggered.connect(self.wake_toggle_requested)
+        self.mute_action = QAction("Mute microphone", self.menu)
+        self.mute_action.triggered.connect(self.mute_toggle_requested)
+        self._showing = True
+        self._muted = False
         quit_action = QAction("Quit E.V.E.", self.menu)
         quit_action.triggered.connect(self.quit_requested)
         self.menu.addAction(self.show_action)
+        self.menu.addAction(self.mute_action)
         self.menu.addAction(self.wake_action)
         self.menu.addSeparator()
         self.menu.addAction(quit_action)
@@ -93,14 +99,27 @@ class TrayIcon(QObject):
     # --- Kept up to date by main.py ------------------------------------------
 
     def display_changed(self, showing: bool) -> None:
+        self._showing = showing
         self.show_action.setText("Hide display" if showing else "Show display")
-        self.icon.setToolTip("E.V.E." if showing else "E.V.E. (hidden, still listening)")
+        self._tooltip()
         if not showing and not self._told_about_hiding:
             # The first time only: a little bubble saying where she went.
             self._told_about_hiding = True
             self.icon.showMessage("E.V.E. is still running",
                                   "Click here or say \"Eve, show yourself\" to bring the display back.",
                                   _eye_icon(), 5000)
+
+    def muted_changed(self, muted: bool) -> None:
+        self._muted = muted
+        self.mute_action.setText("Unmute microphone" if muted else "Mute microphone")
+        self._tooltip()
+
+    def _tooltip(self) -> None:
+        if self._muted:
+            text = "E.V.E. (microphone muted)" if self._showing else "E.V.E. (hidden, microphone muted)"
+        else:
+            text = "E.V.E." if self._showing else "E.V.E. (hidden, still listening)"
+        self.icon.setToolTip(text)
 
     def wake_changed(self, on: bool) -> None:
         self.wake_action.setText("Wake word: ON (click to turn off)" if on else "Wake word: OFF (click to turn on)")

@@ -22,6 +22,8 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QPushButton, Q
 
 from ui import theme, window_memory
 from ui.boot_sequence import BootSequence, ShutdownSequence
+from brain.rate_count import get_rate_count
+from ui.chat_log_panel import ChatLogPanel
 from ui.command_box import CommandBox
 from ui.control_bar import ControlBar
 from ui.event_log import EventLog
@@ -62,6 +64,7 @@ class HudWindow(QWidget):
     talk_released = Signal()
     mode_toggle_pressed = Signal()   # M key: switch the brain between fast and think
     wake_toggle_pressed = Signal()   # W key: switch the wake word ("Eve") on or off
+    mute_toggle_pressed = Signal()   # N key: mute / unmute the microphone
     text_submitted = Signal(str)     # a message typed in the command bar (/ key)
     visibility_changed = Signal(bool)   # True = on screen, False = hidden (she's still running)
 
@@ -89,6 +92,8 @@ class HudWindow(QWidget):
         self._eve_rest = ""   # the part not typed yet (drawn invisibly, to hold its place)
         self._mode = ""       # the brain's mode, shown after the status, e.g. "FAST"
         self._wake = ""       # "ON" / "OFF" for the wake word, or "" before she's loaded
+        self._muted = False   # microphone muted (N key / MIC button)
+        self._gemini = ""     # e.g. "12/15 LEFT · 84 TODAY" (see _update_gemini_count)
         # Types her sentences out letter by letter (see ui/typewriter.py).
         self.typewriter = Typewriter(self)
         self.typewriter.text_changed.connect(self._on_typed)
@@ -117,7 +122,17 @@ class HudWindow(QWidget):
         self._gaze_timer.timeout.connect(self._follow_mouse)
         self._gaze_timer.timeout.connect(self._update_edge_cursor)
         self._gaze_timer.timeout.connect(self._check_timers_panel)
+        # (The eye can also move when the command box opens, so the chat log
+        # panel follows it here too, while it's open.)
+        self._gaze_timer.timeout.connect(lambda: self.chat_log_panel.isVisible() and self._place_chat_log())
         self._gaze_timer.start(33)
+
+        # Once a second: how many Gemini requests are left this minute.
+        self.rate_count = get_rate_count()
+        self._count_timer = QTimer(self)
+        self._count_timer.timeout.connect(self._update_gemini_count)
+        self._count_timer.start(1000)
+        self._update_gemini_count()
 
     # --- Window setup -----------------------------------------------------
 
@@ -173,10 +188,12 @@ class HudWindow(QWidget):
         self.controls = ControlBar()
         self.controls.talk_pressed.connect(self.talk_pressed)
         self.controls.talk_released.connect(self.talk_released)
+        self.controls.mic_clicked.connect(self.mute_toggle_pressed)
         self.controls.type_clicked.connect(self.command_box.open)
         self.controls.mode_clicked.connect(self.mode_toggle_pressed)
         self.controls.wake_clicked.connect(self.wake_toggle_pressed)
         self.controls.power_clicked.connect(self.shutdown)
+        self.controls.log_clicked.connect(self.toggle_chat_log)
 
         centre = QVBoxLayout()
         centre.addWidget(self.eye, stretch=1)
@@ -200,6 +217,10 @@ class HudWindow(QWidget):
         page.setContentsMargins(24, 16, 24, 24)
         page.addLayout(self._build_top_bar())
         page.addLayout(row, stretch=1)
+
+        # The CHAT LOG panel (L key) floats over the eye rather than taking a
+        # place in the layout, so opening it never moves anything else.
+        self.chat_log_panel = ChatLogPanel(self)
 
     def _build_top_bar(self) -> QHBoxLayout:
         """'E.V.E' on the left; hide (-) and close (X) buttons on the right."""
@@ -301,6 +322,12 @@ class HudWindow(QWidget):
             text += f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;MODE // {self._mode}</span>'
         if self._wake:
             text += f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;WAKE // {self._wake}</span>'
+        if self._muted:
+            text += (f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;MIC // </span>'
+                     f'<span style="color:{theme.DANGER.name()}">MUTED</span>')
+        if self._gemini:
+            text += (f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;&nbsp;·&nbsp;&nbsp;GEMINI // </span>'
+                     f'{self._gemini}')
         self.status_label.setText(text)
 
     def show_mode(self, mode: str) -> None:
@@ -315,6 +342,23 @@ class HudWindow(QWidget):
         self._wake = "ON" if on else "OFF"
         self._show_state(self.animator.state)
         self.controls.show_wake(on)
+
+    def show_muted(self, muted: bool) -> None:
+        """Microphone muted: MIC // MUTED in red, and the MIC button goes red."""
+        self._muted = muted
+        self._show_state(self.animator.state)
+        self.controls.show_muted(muted)
+
+    def _update_gemini_count(self) -> None:
+        """GEMINI // 12/15 LEFT · 84 TODAY: amber at 3 left or fewer, red at 0."""
+        count = self.rate_count
+        left = count.left()
+        colour = (theme.DANGER if left == 0 else theme.WARNING if left <= 3 else theme.CYAN).name()
+        text = (f'<span style="color:{colour}">{left}/{count.per_minute} LEFT</span>'
+                f'<span style="color:{theme.TEXT_DIM.name()}">&nbsp;·&nbsp;{count.today()} TODAY</span>')
+        if text != self._gemini:   # only redraw when it changed
+            self._gemini = text
+            self._show_state(self.animator.state)
 
     def show_caption(self, who: str, text: str) -> None:
         """
@@ -383,6 +427,20 @@ class HudWindow(QWidget):
 
     def toggle_hud(self) -> None:
         self.hide_hud() if self.isVisible() else self.show_hud()
+
+    # --- The CHAT LOG panel (L key, LOG button, "Eve, show the chat log") ------
+
+    def show_chat_log(self, open_it: bool) -> None:
+        self._place_chat_log()
+        self.chat_log_panel.set_open(open_it)
+        self.controls.log.setChecked(open_it)
+
+    def toggle_chat_log(self) -> None:
+        self.show_chat_log(not self.chat_log_panel.isVisible())
+
+    def _place_chat_log(self) -> None:
+        """Lay the panel exactly over the eye (called again whenever the window resizes)."""
+        self.chat_log_panel.setGeometry(self.eye.geometry().adjusted(4, 4, -4, -4))
 
     def shutdown(self) -> None:
         """Play the shutdown animation, then fade out and quit."""
@@ -457,10 +515,14 @@ class HudWindow(QWidget):
             self.mode_toggle_pressed.emit()
         elif key == "w":
             self.wake_toggle_pressed.emit()
+        elif key == "n":
+            self.mute_toggle_pressed.emit()
         elif key == "/":
             self.command_box.open()   # from now, typing goes into the box
         elif key == "h":
             self.hide_hud()
+        elif key == "l":
+            self.toggle_chat_log()
         elif event.key() == Qt.Key_Escape:
             self.shutdown()
 
@@ -528,6 +590,7 @@ class HudWindow(QWidget):
         super().resizeEvent(event)
         if self._compact is not None:   # (not before __init__ has finished)
             self._fit_layout()
+            self._place_chat_log()
         if self.isVisible():
             self._save_timer.start()
 

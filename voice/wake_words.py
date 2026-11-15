@@ -8,6 +8,8 @@ The words that wake E.V.E. up, put her back to sleep, or shut her down.
     "Eve, shut down"             -> she plays the shutdown animation and closes
     "Eve, hide"                  -> the display hides; she keeps running
     "Eve, show yourself"         -> the display comes back
+    "Eve, show the chat log"     -> the CHAT LOG panel opens ("hide the log" closes it)
+    "Eve, mute yourself"         -> the microphone is muted (unmute: N key or MIC button)
 
 Sleep, shut-down, hide and show only count if they are the WHOLE message,
 so "How do I shut down my laptop?" or "How do I hide a folder?" are still
@@ -59,12 +61,33 @@ SHOW_PHRASES = {
     "where are you", "let me see you", "come out", "come out of hiding", "i want to see you",
     "show your face", "bring up the display", "open the display", "pop up",
 }
+# Show or hide the CHAT LOG panel (the last 10 chats).
+LOG_SHOW_PHRASES = {
+    "show the log", "show the chat log", "show your log", "show me the log", "show me the chat log",
+    "open the log", "open the chat log", "show the speech log", "open the speech log",
+    "show chat history", "show the chat history", "show me our chats", "show our chats",
+    "what have we talked about", "show the conversation",
+}
+LOG_HIDE_PHRASES = {
+    "hide the log", "hide the chat log", "close the log", "close the chat log",
+    "hide the speech log", "close the speech log", "hide chat history", "close chat history",
+}
+# Mute the microphone ("mute" on its own means the SOUND, so it isn't here).
+# There's no voice command to unmute: once muted, she can't hear it.
+MUTE_PHRASES = {
+    "mute yourself", "mute your microphone", "mute the microphone", "mute your mic", "mute the mic",
+    "mute mic", "mic off", "microphone off", "turn off your microphone", "turn off the microphone",
+    "turn your microphone off", "turn the microphone off", "switch off your microphone",
+    "stop listening to me", "don't listen to me", "dont listen to me", "go deaf",
+}
 # What she says for each.
 WAKE_REPLY = "Yes, sir?"
 SLEEP_REPLY = "Very good, sir."
 SHUTDOWN_REPLY = "Shutting down, sir."
 HIDE_REPLY = "I'll stay out of sight, sir. Just say my name if you need me."
 SHOW_REPLY = "Here, sir."
+LOG_SHOW_REPLY = "Here are our last few chats, sir."
+LOG_HIDE_REPLY = "Log closed, sir."
 
 # Polite words trimmed off both ends before matching: "Eve, please shut down" -> "shut down".
 _FILLER = {"eve", "eva", "evie", "hey", "ok", "okay", "please", "now", "just", "you", "can", "could"}
@@ -111,6 +134,20 @@ def wants_show(text: str) -> bool:
     return _command(text) in SHOW_PHRASES
 
 
+def wants_mute(text: str) -> bool:
+    return _command(text) in MUTE_PHRASES
+
+
+def wants_log(text: str) -> bool | None:
+    """True = show the chat log, False = hide it, None = not about the log."""
+    command = _command(text)
+    if command in LOG_SHOW_PHRASES:
+        return True
+    if command in LOG_HIDE_PHRASES:
+        return False
+    return None
+
+
 if __name__ == "__main__":
     # Quick check of the rules, no microphone needed.
     examples = [
@@ -118,6 +155,7 @@ if __name__ == "__main__":
         "Steve is coming round", "Thanks Eve.", "That's all.", "Eve, shut down.",
         "Eve, please power off", "How do I shut down my laptop?", "evening all",
         "Eve, hide.", "Eve, show yourself", "Come back, Eve", "How do I hide a folder, Eve?",
+        "Eve, show the chat log", "Eve, close the log", "Eve, mute yourself", "Eve, mute", "Eve, how do I read a log file?",
     ]
     for line in examples:
         rest = split_wake(line)
@@ -125,6 +163,9 @@ if __name__ == "__main__":
                    else "SHUT DOWN" if wants_shutdown(rest)
                    else "HIDE DISPLAY" if wants_hide(rest)
                    else "SHOW DISPLAY" if wants_show(rest)
+                   else "MUTE MICROPHONE" if wants_mute(rest)
+                   else "SHOW CHAT LOG" if wants_log(rest) is True
+                   else "HIDE CHAT LOG" if wants_log(rest) is False
                    else "SLEEP" if wants_sleep(rest)
                    else "WAKE: \"Yes, sir?\"" if rest == ""
                    else f"ask the brain: \"{rest}\"")

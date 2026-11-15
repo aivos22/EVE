@@ -41,8 +41,10 @@ from google import genai
 from google.genai import errors, types
 
 from brain import confirm
+from brain.chat_log import get_chat_log, nice_time
 from brain.commands import command_words
 from brain.memory import get_memory
+from brain.rate_count import get_rate_count
 
 # google-genai talks to the internet through a web library: "httpx2" in the
 # version we have, plain "httpx" in older ones. We only need their error
@@ -134,6 +136,20 @@ class Brain:
         self.personality = PERSONALITY_FILE.read_text(encoding="utf-8")
         # The conversation so far: a list of messages, alternating "user" and "model".
         self.history: list[types.Content] = []
+        # The speech log (brain/chat_log.py). If the last chat was recent,
+        # carry on from it: those chats go back into her short-term memory.
+        self.chat_log = get_chat_log()
+        earlier = self.chat_log.to_reload()
+        for chat in earlier:
+            self.history.append(types.Content(role="user", parts=[types.Part(text=chat["you"])]))
+            self.history.append(types.Content(role="model", parts=[types.Part(text=chat["eve"])]))
+        # How many exchanges at the start of her history are from before she
+        # restarted, and when the last one was (she's told, so she doesn't
+        # think sir is still on that topic).
+        self.earlier = len(earlier)
+        self.earlier_time = nice_time(earlier[-1]["time"]) if earlier else ""
+        if earlier:
+            diary.info(f"Chat log: picked up {len(earlier)} chats from earlier (last at {self.earlier_time})")
         wanted = os.getenv("EVE_BRAIN_MODE", DEFAULT_MODE).strip().lower()
         self.mode = wanted if wanted in MODES else DEFAULT_MODE
         # Something to call with short notes for the log (e.g. "think model busy").
@@ -209,6 +225,35 @@ class Brain:
             yield confirm.ask_first(question, wipe, "wipe long-term memory")["say"]
             return
 
+        # "Clear the chat log": deletes the saved chats, so ask first too.
+        if wants_log_clear(text):
+            count = len(self.chat_log.all())
+            if count == 0:
+                yield "The chat log is already empty, sir."
+                return
+
+            def clear() -> str:
+                cleared = self.chat_log.clear()
+                self.history.clear()   # what's in her memory came from the log
+                self.earlier = 0
+                self.on_note(f"Chat log cleared ({cleared} chats)")
+                return "Done, sir. The chat log is empty."
+
+            chats = "one chat" if count == 1 else f"{count} chats"
+            question = f"Just to be sure, sir: that deletes the {chats} in my chat log. Say yes to confirm."
+            yield confirm.ask_first(question, clear, "clear the chat log")["say"]
+            return
+
+        # Used up this minute's free requests? Say so, rather than send one
+        # that Google would refuse (which would sound like being offline).
+        wait = get_rate_count().seconds_until_free()
+        if wait:
+            limit = get_rate_count().per_minute
+            self.on_note(f"Gemini limit reached ({limit} a minute): {wait}s to wait")
+            yield (f"I've used my {limit} requests for this minute, sir. "
+                   f"Give me about {_round_up(wait)} seconds.")
+            return
+
         message = types.Content(role="user", parts=[types.Part(text=text)])
         said = []   # every sentence handed out, to remember at the end
         try:
@@ -264,7 +309,7 @@ class Brain:
         # Her instructions (personality + date + memory) are made ONCE per
         # question. If she saves a fact mid-answer, she shouldn't then see it
         # in her memory and think she "already knew" it.
-        instructions = self.personality + situation()
+        instructions = self.personality + situation() + self._earlier_note()
         said = message.parts[0].text if message.parts else ""   # sir's own words, for run_tool's checks
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # On the last round, don't offer tools, so she has to answer.
@@ -282,6 +327,7 @@ class Brain:
             )
 
             reply_parts = []   # everything Gemini sent this round
+            get_rate_count().note()   # one more request (for the HUD's GEMINI // count)
             if mode.stream:
                 # The reply arrives in "chunks" of a few words each.
                 chunks = self.client.models.generate_content_stream(
@@ -344,11 +390,28 @@ class Brain:
         self.history.append(message)
         self.history.append(types.Content(role="model", parts=[types.Part(text=reply)]))
         # Each exchange is 2 messages; keep only the most recent ones.
+        dropped = max(0, len(self.history) // 2 - MAX_EXCHANGES)
         self.history = self.history[-MAX_EXCHANGES * 2:]
+        # Older exchanges drop off the front first, so the earlier-session ones go first.
+        self.earlier = max(0, self.earlier - dropped)
+        # ...and into the speech log file (brain/chat_log.py).
+        self.chat_log.add(message.parts[0].text or "", reply)
+
+    def _earlier_note(self) -> str:
+        """Tell her which chats are from before she restarted, if any are left."""
+        if not self.earlier:
+            return ""
+        return (f"\n\nThe first {self.earlier} exchanges of this conversation are from an "
+                f"earlier session (the last one at {self.earlier_time}), before you were "
+                "restarted. Sir may have moved on to something else: don't assume he's "
+                "still on that topic, and don't bring it up unless he does.")
 
     def forget(self) -> None:
         """Wipe the conversation memory (a fresh start)."""
         self.history.clear()
+        self.earlier = 0
+        # The log keeps the chats to read, but they won't be reloaded at start-up.
+        self.chat_log.mark_fresh_start()
 
 
 # --- "Start fresh" ----------------------------------------------------------
@@ -388,6 +451,24 @@ MEMORY_WIPE_PHRASES = {
 
 def wants_memory_wipe(text: str) -> bool:
     return command_words(text) in MEMORY_WIPE_PHRASES
+
+
+# "Clear the chat log": deletes data/chat_log.json's chats (asks first).
+LOG_CLEAR_PHRASES = {
+    "clear the log", "clear your log", "clear the chat log", "clear your chat log",
+    "delete the chat log", "delete your chat log", "wipe the chat log", "wipe your chat log",
+    "empty the chat log", "clear the speech log", "delete the speech log", "wipe the speech log",
+    "clear chat history", "clear the chat history", "delete the chat history",
+}
+
+
+def _round_up(seconds: int) -> int:
+    """Round up to the next 5 seconds, so she says "about 20", not "about 17"."""
+    return max(5, -(-seconds // 5) * 5)
+
+
+def wants_log_clear(text: str) -> bool:
+    return command_words(text) in LOG_CLEAR_PHRASES
 
 
 # --- What's going on right now ----------------------------------------------

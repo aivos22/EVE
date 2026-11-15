@@ -165,6 +165,19 @@ class SpeechToText:
             except Exception:
                 break
 
+    def set_microphone(self, on: bool) -> None:
+        """
+        Muting: with on=False the library throws away everything the microphone
+        hears, so nothing can be recorded or turned into text. (The microphone
+        stays connected, so unmuting is instant.)
+        """
+        try:
+            self._recorder.set_microphone(on)
+        except Exception:
+            # Older/newer library without this switch: the voice controller's
+            # own mute (no listening, no push-to-talk) still applies.
+            logging.getLogger("eve").warning("Speech library has no microphone switch", exc_info=True)
+
     def shutdown(self) -> None:
         """Release the microphone and stop RealtimeSTT's helper processes."""
         # RealtimeSTT has a small bug that prints a scary but harmless error
