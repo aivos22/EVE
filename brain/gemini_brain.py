@@ -21,8 +21,9 @@ The conversation is capped at MAX_EXCHANGES back-and-forths, so it never
 grows forever (and each request stays quick and cheap).
 
 She can also use tools from the actions/ folder: look-ups (weather,
-Wikipedia, web search, memory) and actions (open apps and websites,
-timers). Gemini decides when a message needs one; see _text_pieces().
+Wikipedia, web search, memory, files, looking at the screen) and actions
+(open apps, websites and files, timers, volume and media). Gemini decides
+when a message needs one; see _text_pieces().
 Anything risky asks sir first; see brain/confirm.py.
 
 This file knows nothing about the HUD or the voice. It just turns text
@@ -264,6 +265,7 @@ class Brain:
         # question. If she saves a fact mid-answer, she shouldn't then see it
         # in her memory and think she "already knew" it.
         instructions = self.personality + situation()
+        said = message.parts[0].text if message.parts else ""   # sir's own words, for run_tool's checks
         for round_number in range(MAX_TOOL_ROUNDS + 1):
             # On the last round, don't offer tools, so she has to answer.
             offer_tools = bool(TOOLS) and round_number < MAX_TOOL_ROUNDS
@@ -305,12 +307,20 @@ class Brain:
             # "thought signature" that Gemini needs to see again.
             contents.append(types.Content(role="model", parts=reply_parts))
             results = []
+            pictures = []      # screenshots from look_at_screen, sent after the results
             quick_lines = []   # each tool's ready-made "say" line, if it has one
             for request in tool_requests:
                 args = dict(request.args or {})
                 self.on_tool(describe_tool(request.name, args))
-                result = run_tool(request.name, args)
-                quick_lines.append(result.get("say") if isinstance(result, dict) else None)
+                result = run_tool(request.name, args, said=said)
+                # A screenshot can't go in the (text-only) result, so it's
+                # sent as a picture next to it. It only ever lives in this
+                # `contents` list, never in her history, so once she has
+                # answered it's gone (see actions/screen.py).
+                image = result.pop("_image", None)
+                if image:
+                    pictures.append(types.Part.from_bytes(data=image, mime_type="image/jpeg"))
+                quick_lines.append(result.get("say"))
                 results.append(types.Part(function_response=types.FunctionResponse(
                     id=request.id, name=request.name, response=result)))
             self.on_tool(None)   # tools finished, back to thinking
@@ -328,7 +338,7 @@ class Brain:
                         line = re.sub(r",? sir([.?!])$", r"\1", line)
                     yield "\n" + line   # the line break keeps each one a separate sentence
                 return
-            contents.append(types.Content(role="user", parts=results))
+            contents.append(types.Content(role="user", parts=results + pictures))
 
     def _remember(self, message: types.Content, reply: str) -> None:
         self.history.append(message)

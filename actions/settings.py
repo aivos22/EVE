@@ -21,11 +21,24 @@ to open it. Three ways work on any PC, without knowing where it's installed:
 Each website has its address, and optionally a "search" address where {}
 is replaced by what to search for.
 
+Each folder is one she may look inside (find, list and open files), with
+its full path. Everything inside it, including subfolders, is allowed;
+nothing outside it is. Paths may use ~ for your user folder.
+
+"screen" has the switches for look_at_screen (actions/screen.py).
+
+If your file is from before a section existed, that section is added to
+it with the defaults, and everything you wrote is kept.
+
 See what's set up:   .venv\\Scripts\\python -m actions.settings
 """
 
+import ctypes
 import json
+import os
 import re
+import uuid
+from pathlib import Path
 
 from paths import DATA_DIR
 
@@ -74,6 +87,26 @@ DEFAULTS = {
         "Amazon": {"names": ["amazon uk"], "url": "https://www.amazon.co.uk",
                    "search": "https://www.amazon.co.uk/s?k={}"},
     },
+    # "folders" is filled in when the file is written (see _default_folders),
+    # because where Documents really is differs between PCs (e.g. OneDrive).
+    "screen": {
+        "hide_hud_from_screenshots": False,
+    },
+}
+
+HOW_TO_FOLDERS = [
+    "Folders: the only places she may find, list and open files (subfolders too).",
+    "Add one like  \"EPQ\": {\"names\": [\"my epq\"], \"path\": \"D:\\\\School\\\\EPQ\"}",
+    "(in a path, write each \\ twice, or use / instead).",
+    "screen: hide_hud_from_screenshots true = she sees past the HUD, but it's also",
+    "missing from YOUR screenshots and recordings. Needs a restart of E.V.E.",
+]
+
+# Windows' own IDs for its special folders, so we find them wherever they really are.
+KNOWN_FOLDERS = {
+    "Documents": ("FDD39AD0-238F-46AF-ADB4-6C85480369C7", ["my documents", "docs"]),
+    "Desktop": ("B4BFCC3A-DB2C-424C-B029-7FE99A87C641", []),
+    "Downloads": ("374DE290-123F-4565-9164-39C4925E467B", ["my downloads"]),
 }
 
 
@@ -90,6 +123,20 @@ def simplify(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name)
 
 
+FILLER_WORDS = {"the", "my", "a", "an", "file", "files", "called", "named", "document", "doc"}
+
+
+def simplify_words(name: str) -> list[str]:
+    """
+    "My physics-notes file" -> ["physics", "notes"]: each word simplified,
+    without filler words. (If that leaves nothing, the filler words stay.)
+    """
+    words = [simplify(w) for w in re.split(r"[\s_\-]+", name)]
+    words = [w for w in words if w]
+    useful = [w for w in words if w not in FILLER_WORDS]
+    return useful or words
+
+
 def load() -> dict:
     """
     Read data/actions.json (creating it with the defaults if it's missing).
@@ -98,7 +145,8 @@ def load() -> dict:
     in wrongly, so one typo doesn't switch everything off.
     """
     if not SETTINGS_FILE.exists():
-        SETTINGS_FILE.write_text(json.dumps(DEFAULTS, indent=2, ensure_ascii=False), encoding="utf-8")
+        first = dict(DEFAULTS, _how_to=DEFAULTS["_how_to"] + HOW_TO_FOLDERS, folders=_default_folders())
+        SETTINGS_FILE.write_text(json.dumps(first, indent=2, ensure_ascii=False), encoding="utf-8")
     try:
         # "utf-8-sig" also accepts the invisible marker (a "BOM") that some
         # Windows editors put at the start of a file when saving it.
@@ -111,10 +159,23 @@ def load() -> dict:
         raise SettingsError(f"couldn't read data/actions.json ({error.strerror})") from error
     if not isinstance(raw, dict):
         raise SettingsError("data/actions.json should start with { and end with }")
+    _add_new_sections(raw)
 
     problems = []
     apps = _entries(raw, "apps", "open", problems)
     websites = _entries(raw, "websites", "url", problems)
+    folders = _entries(raw, "folders", "path", problems)
+    for name, folder in list(folders.items()):
+        path = Path(os.path.expandvars(os.path.expanduser(folder["path"].strip())))
+        if not path.is_absolute():
+            problems.append(f"folder {name}: path must be a full path, like C:\\Users\\you\\Documents")
+            del folders[name]
+        elif not path.is_dir():
+            problems.append(f"folder {name}: {path} doesn't exist on this PC")
+            del folders[name]
+        else:
+            folder["where"] = path.resolve()   # the real place, with any shortcuts followed
+    screen = raw.get("screen") if isinstance(raw.get("screen"), dict) else {}
     for name, site in list(websites.items()):
         if not site["url"].lower().startswith(("http://", "https://")):
             problems.append(f"website {name}: url must start with http:// or https://")
@@ -122,7 +183,51 @@ def load() -> dict:
         elif "search" in site and "{}" not in str(site["search"]):
             problems.append(f"website {name}: search address needs {{}} where the words go")
             del site["search"]
-    return {"apps": apps, "websites": websites, "problems": problems}
+    return {"apps": apps, "websites": websites, "folders": folders,
+            "screen": {"hide_hud_from_screenshots": screen.get("hide_hud_from_screenshots") is True},
+            "problems": problems}
+
+
+def _add_new_sections(raw: dict) -> None:
+    """
+    Files written before "folders" and "screen" existed get them added, with
+    the defaults, and are saved again. Everything already in the file stays.
+    """
+    added = False
+    if "folders" not in raw:
+        raw["folders"] = _default_folders()
+        added = True
+    if "screen" not in raw:
+        raw["screen"] = dict(DEFAULTS["screen"])
+        added = True
+    if added:
+        if isinstance(raw.get("_how_to"), list):
+            raw["_how_to"] += [line for line in HOW_TO_FOLDERS if line not in raw["_how_to"]]
+        SETTINGS_FILE.write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _default_folders() -> dict:
+    """Documents, Desktop and Downloads, wherever Windows really keeps them on this PC."""
+    folders = {}
+    for name, (folder_id, names) in KNOWN_FOLDERS.items():
+        path = _known_folder(folder_id) or Path.home() / name
+        if path.is_dir():
+            folders[name] = {"names": names, "path": str(path)}
+    return folders
+
+
+def _known_folder(folder_id: str) -> Path | None:
+    """Ask Windows where one of its special folders is (this only READS it)."""
+    try:
+        guid = (ctypes.c_byte * 16).from_buffer_copy(uuid.UUID(folder_id).bytes_le)
+        found = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(found)) != 0:
+            return None
+        path = Path(found.value)
+        ctypes.windll.ole32.CoTaskMemFree(found)
+        return path
+    except (OSError, AttributeError, ValueError):
+        return None
 
 
 def _entries(raw: dict, section: str, needed: str, problems: list) -> dict:
@@ -140,8 +245,9 @@ def _entries(raw: dict, section: str, needed: str, problems: list) -> dict:
 
 def find(section: str, name: str):
     """
-    Look up an app or website by any of its names. Returns (friendly name, entry),
-    or (None, None) if it isn't in the file. `section` is "apps" or "websites".
+    Look up an app, website or folder by any of its names. Returns (friendly
+    name, entry), or (None, None) if it isn't in the file. `section` is
+    "apps", "websites" or "folders".
     """
     wanted = simplify(name)
     if not wanted:
@@ -160,11 +266,12 @@ def known_names(section: str) -> list[str]:
 if __name__ == "__main__":
     settings = load()
     print(f"Settings file: {SETTINGS_FILE}")
-    for section in ("apps", "websites"):
+    for section in ("apps", "websites", "folders"):
         print(f"\n{section.upper()}")
         for friendly, entry in settings[section].items():
             also = f"  (also: {', '.join(entry['names'])})" if entry["names"] else ""
-            how = entry.get("open") or entry.get("url")
+            how = entry.get("open") or entry.get("url") or entry.get("where")
             print(f"  {friendly:<14} {how}{also}")
+    print(f"\nSCREEN\n  hide HUD from screenshots: {settings['screen']['hide_hud_from_screenshots']}")
     for problem in settings["problems"]:
         print(f"\nSkipped: {problem}")

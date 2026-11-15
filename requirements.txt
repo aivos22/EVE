@@ -13,3 +13,4 @@ Pillow
 mss
 websockets
 psutil
+pycaw
