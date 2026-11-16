@@ -4,7 +4,7 @@ E.V.E.'s actions: things she can DO, rather than just say.
 Two kinds of tool:
   - look-ups (weather, Wikipedia, web search, memory): Gemini reads the
     result and puts it into words
-  - actions (open apps and websites, timers): these do something on the PC,
+  - actions (open and close apps, open websites and files, timers, volume and media): these do something on the PC,
     and only from an allowlist (data/actions.json), never a free-form command
 
 Each one is a plain Python function with a docstring explaining what it's
@@ -32,7 +32,12 @@ import logging
 
 from actions import settings
 from actions.apps import open_app
+from actions.close import close_app
+from actions.files import find_files, list_folder, open_file
+from actions.media import change_volume, control_media
 from actions.memory_tools import forget_about_sir, remember_about_sir
+from actions import screen
+from actions.screen import look_at_screen
 from actions.timers import cancel_timer, list_timers, say_duration, set_timer, tidy_label
 from actions.weather import get_weather
 from actions.web_search import search_web
@@ -40,7 +45,8 @@ from actions.websites import open_website
 from actions.wikipedia import look_up_wikipedia
 
 TOOLS = [get_weather, look_up_wikipedia, search_web, remember_about_sir, forget_about_sir,
-         open_app, open_website, set_timer, cancel_timer, list_timers]
+         open_app, close_app, open_website, set_timer, cancel_timer, list_timers,
+         change_volume, control_media, look_at_screen, find_files, list_folder, open_file]
 _BY_NAME = {tool.__name__: tool for tool in TOOLS}
 
 diary = logging.getLogger("eve")
@@ -54,7 +60,15 @@ LABELS = {
     "forget_about_sir": "Forgetting fact",
     "cancel_timer": "Cancelling timer",
     "list_timers": "Checking timers",
+    "look_at_screen": "Looking at screen",
+    "find_files": "Searching files",
+    "list_folder": "Listing folder",
+    "open_file": "Opening file",
 }
+
+# Tools that only run if sir's OWN message asks for them. Checked here, in
+# our code, so Gemini can't decide by itself to, say, look at the screen.
+NEEDS_ASKING = {"look_at_screen": (screen.asked_to_look, screen.REFUSED)}
 
 
 def _friendly(section: str, name: str) -> str:
@@ -77,10 +91,17 @@ def _timer_line(args: dict) -> str:
 # "Searching YouTube: lo-fi beats", instead of "label: first detail".
 SPECIAL_LINES = {
     "open_app": lambda args: f"Opening {_friendly('apps', args.get('name', ''))}",
+    "close_app": lambda args: f"Closing {_friendly('apps', args.get('name', ''))}",
     "open_website": lambda args: (
         f"Searching {_friendly('websites', args.get('site', ''))}: {args['search']}" if args.get("search")
         else f"Opening {_friendly('websites', args.get('site', ''))}"),
     "set_timer": _timer_line,
+    "change_volume": lambda args: {
+        "set": f"Volume {args.get('level', 0)}%", "mute": "Muting", "unmute": "Unmuting",
+    }.get(str(args.get("action", "")).lower(), f"Volume {args.get('action', '')}"),
+    "control_media": lambda args: {
+        "play_pause": "Media: play/pause", "next": "Media: next track", "previous": "Media: previous track",
+    }.get(str(args.get("action", "")).lower(), f"Media: {args.get('action', '')}"),
 }
 
 
@@ -98,18 +119,28 @@ def describe(name: str, args: dict) -> str:
     return f"{label}: {detail}" if detail else label
 
 
-def run_tool(name: str, args: dict) -> dict:
+def run_tool(name: str, args: dict, said: str | None = None) -> dict:
     """
     Run the tool called `name` with `args`, and ALWAYS return a dict, even
     if it fails. A failure comes back as {"error": "..."}, which Gemini reads
     and explains politely, instead of the whole reply crashing.
 
+    `said` is sir's own message. The brain always passes it, so tools in
+    NEEDS_ASKING can check he really asked. (Testing from the command line
+    passes nothing, and typing the command counts as asking.)
+
     Every call is written in the diary with what came back, e.g.
         [TOOL] open_app {"name": "spotify"} -> {"opened": "Spotify", ...}
+    Parts of the result whose names start with "_" (like a screenshot) are
+    left out of the diary.
     """
     tool = _BY_NAME.get(name)
+    check = NEEDS_ASKING.get(name)
     if tool is None:
         result = {"error": f"There's no tool called {name}"}
+    elif check and said is not None and not check[0](said):
+        diary.info(f"[TOOL] Refused {name}: sir's message didn't ask for it")
+        result = dict(check[1])
     else:
         try:
             result = tool(**args)
@@ -117,7 +148,10 @@ def run_tool(name: str, args: dict) -> dict:
             # The type and message say whether it was the internet, the website, or our code.
             diary.warning(f"Tool {name}({args}) failed: {error!r}")
             result = {"error": f"{name} failed: {type(error).__name__}: {error}"[:200]}
-    shown = json.dumps(result, ensure_ascii=False, default=str)
+    if not isinstance(result, dict):
+        result = {"result": result}
+    for_diary = {key: value for key, value in result.items() if not str(key).startswith("_")}
+    shown = json.dumps(for_diary, ensure_ascii=False, default=str)
     diary.info(f"[TOOL] {name} {json.dumps(args, ensure_ascii=False, default=str)} -> "
                + (shown if len(shown) <= 300 else shown[:300] + "..."))
     return result

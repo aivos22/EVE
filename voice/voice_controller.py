@@ -29,6 +29,7 @@ freezes. The controller never touches the window directly. It only
 sends out signals, and main.py connects those to the HUD.
 """
 
+import json
 import logging
 import os
 import queue
@@ -38,6 +39,7 @@ import wave
 
 from PySide6.QtCore import QObject, Signal
 
+from paths import DATA_DIR
 from ui.eye_state import EyeState
 from voice.microphone import check_microphone
 from voice.stt import SpeechToText
@@ -59,6 +61,9 @@ FOLLOW_UP_SECONDS = 8
 # How long she waits after she stops talking before listening again, so the
 # last echo of her own voice from the speakers isn't picked up.
 QUIET_AFTER_SPEAKING = 0.6
+# Whether the microphone is muted is remembered here between runs.
+MIC_FILE = DATA_DIR / "microphone.json"
+MUTED_LINE = "Microphone off, sir. Press N or click MIC to turn me back on."
 
 
 class BrainError(Exception):
@@ -97,7 +102,11 @@ class VoiceController(QObject):
     level = Signal(float)      # her voice loudness 0-1, many times a second while speaking
     mode_changed = Signal(str) # the brain's mode label, "FAST" or "THINK"
     wake_changed = Signal(bool)    # wake word switched on (True) or off (False)
+    muted_changed = Signal(bool)   # microphone muted (True) or listening again (False)
     shutdown_requested = Signal()  # "Eve, shut down": the window should close
+    hide_requested = Signal()      # "Eve, hide": take the display off screen (she keeps running)
+    show_requested = Signal()      # "Eve, show yourself": bring the display back
+    chat_log_requested = Signal(bool)  # "Eve, show/hide the chat log": True = open it
     timer_done = Signal(str)   # a timer went off, e.g. "pasta timer": the eye should flash
 
     def __init__(self, timers=None, parent=None):
@@ -127,6 +136,8 @@ class VoiceController(QObject):
         self._idle_since = 0.0     # when she last went idle (time.time())
         self._awake_until = 0.0    # listening without her name until this time
         self._follow_up = False    # True = open the follow-up window after this reply
+        # Mute (N key / MIC button): she hears nothing at all, not even her name.
+        self.muted = _load_muted()
 
     # --- Starting and stopping ------------------------------------------
 
@@ -155,6 +166,9 @@ class VoiceController(QObject):
             return
         if self.status == "working":
             return   # still transcribing or thinking about the last thing you said
+        if self.muted:
+            self.log.emit("Microphone is muted. Press N or click MIC to unmute", "VOICE")
+            return
         if self.stt is None:
             # No microphone. Check again in the background (it may have been
             # plugged in since); until then, typing with / still works.
@@ -217,6 +231,38 @@ class VoiceController(QObject):
         self.log.emit(f"Switched to {self.brain.describe()}", "BRAIN")
         self.mode_changed.emit(self.brain.mode.upper())
 
+    def toggle_mute(self) -> None:
+        """N key / MIC button / tray: mute or unmute the microphone."""
+        self.set_muted(not self.muted)
+
+    def set_muted(self, muted: bool) -> None:
+        """
+        Muted: no wake word, no push-to-talk, and the speech library throws
+        away whatever the microphone hears. Typing (/) still works.
+        Safe to call from any thread.
+        """
+        if muted == self.muted:
+            return
+        self.muted = muted
+        if muted:
+            self._stop_overhearing.set()   # stop waiting for her name right now
+            self._awake_until = 0.0
+            if self.status == "recording" and self.stt:
+                # Muted while Space was held: drop what was being recorded.
+                try:
+                    self.stt._recorder.abort()
+                except Exception:
+                    pass
+                self.caption.emit("you", "")
+                self._back_to_idle()
+        if self.stt:
+            self.stt.set_microphone(not muted)
+        _save_muted(muted)
+        self.log.emit("Microphone muted: I can't hear you. N to unmute" if muted
+                      else "Microphone on", "VOICE")
+        diary.info(f"[MIC] {'Muted' if muted else 'Unmuted'}")
+        self.muted_changed.emit(muted)
+
     def toggle_wake(self) -> None:
         """Switch the wake word on or off (W key)."""
         self.wake_on = not self.wake_on
@@ -273,6 +319,8 @@ class VoiceController(QObject):
             try:
                 self.stt = SpeechToText(on_live_text=self._live_caption)
                 self._mic_problem = ""
+                if self.muted:
+                    self.stt.set_microphone(False)   # she was muted last time: stay muted
                 return True
             except Exception as error:
                 problem = f"speech recognition failed to load ({type(error).__name__})"
@@ -306,8 +354,11 @@ class VoiceController(QObject):
                 pass   # not worth failing start-up over; she'll try again when needed
         mode = "brain connected" if self.brain else "echo mode" if not self._get_brain else "brain offline"
         self.wake_changed.emit(self.wake_on)
+        self.muted_changed.emit(self.muted)
         if self.stt:
             how = 'Say "Eve" or hold Space' if self.wake_on else "Hold Space to talk"
+            if self.muted:
+                how = "Microphone muted: N to unmute, / to type"
             self.log.emit(f"Ready, {mode}. {how}", "VOICE")
             return
         # No hearing: say so out loud once, and point to the command bar.
@@ -371,7 +422,7 @@ class VoiceController(QObject):
     def _can_overhear(self) -> bool:
         """True when the listener may wait for her name: wake word on, she can
         hear, she's idle, and she finished talking a moment ago."""
-        return (self.wake_on and self.stt is not None and self.status == "idle"
+        return (self.wake_on and not self.muted and self.stt is not None and self.status == "idle"
                 and not self._closing.is_set()
                 and time.time() - self._idle_since >= QUIET_AFTER_SPEAKING)
 
@@ -399,7 +450,7 @@ class VoiceController(QObject):
                 diary.exception("Listening for the wake word failed")
                 time.sleep(1)
                 continue
-            if self._stop_overhearing.is_set() or self.status != "idle":
+            if self._stop_overhearing.is_set() or self.status != "idle" or self.muted:
                 continue   # Space, typing or closing took over; ignore what was heard
             if not text:
                 if awake and time.time() >= self._awake_until:
@@ -482,6 +533,26 @@ class VoiceController(QObject):
             self.log.emit("Shutdown requested", "VOICE")
             self._speak([wake_words.SHUTDOWN_REPLY])
             self.shutdown_requested.emit()
+            return
+        if wake_words.wants_hide(text):
+            self.log.emit("Hiding the display", "VOICE")
+            self.hide_requested.emit()   # (signals reach the window safely from this thread)
+            self._speak([wake_words.HIDE_REPLY])
+            return
+        if wake_words.wants_show(text):
+            self.log.emit("Showing the display", "VOICE")
+            self.show_requested.emit()
+            self._speak([wake_words.SHOW_REPLY])
+            return
+        if wake_words.wants_mute(text):
+            self.set_muted(True)
+            self._speak([MUTED_LINE])
+            return
+        log_wanted = wake_words.wants_log(text)
+        if log_wanted is not None:
+            self.log.emit("Showing the chat log" if log_wanted else "Closing the chat log", "VOICE")
+            self.chat_log_requested.emit(log_wanted)
+            self._speak([wake_words.LOG_SHOW_REPLY if log_wanted else wake_words.LOG_HIDE_REPLY])
             return
         if wake_words.wants_sleep(text):
             self._speak([wake_words.SLEEP_REPLY])   # no follow-up window: she's done
@@ -601,3 +672,18 @@ class VoiceController(QObject):
         self._follow_up = False
         self.status = "idle"
         self.state.emit(EyeState.IDLE)
+
+
+def _load_muted() -> bool:
+    """Was the microphone muted when E.V.E. last closed?"""
+    try:
+        return json.loads(MIC_FILE.read_text(encoding="utf-8")).get("muted") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _save_muted(muted: bool) -> None:
+    try:
+        MIC_FILE.write_text(json.dumps({"muted": muted}), encoding="utf-8")
+    except OSError as error:
+        diary.warning(f"Couldn't save the microphone setting: {error}")
