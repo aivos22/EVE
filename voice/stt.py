@@ -22,70 +22,19 @@ import os
 import threading
 import time
 
-from dotenv import load_dotenv
+from paths import MODELS_DIR
 
-from paths import BASE_DIR, MODELS_DIR
-
-# Read .env now, because the settings below are read the moment this file is
-# imported (main.py loads .env too, but only after importing us). Settings
-# already set aren't overwritten, so loading it twice is harmless.
-load_dotenv(BASE_DIR / ".env")
 # Tell the libraries RealtimeSTT uses where to keep their downloads.
 # This MUST happen before RealtimeSTT is imported, so it's at the top.
 WHISPER_DIR = MODELS_DIR / "whisper"
 os.environ.setdefault("HF_HOME", str(MODELS_DIR / "huggingface"))
 os.environ.setdefault("TORCH_HOME", str(MODELS_DIR / "torch"))
 
-import numpy as np  # noqa: E402
 import torch  # noqa: E402  (imported after the settings above on purpose)
 from RealtimeSTT import AudioToTextRecorder  # noqa: E402
 
 FINAL_MODEL = "base.en"  # accurate model for the final transcript
 LIVE_MODEL = "tiny.en"   # small, fast model for the live caption while you talk
-
-SAMPLE_RATE = 16000      # the library records 16,000 sound samples a second
-
-
-def _setting(name: str, default: float) -> float:
-    """A number from .env, or the default if it's missing or not a number."""
-    try:
-        return float(os.getenv(name, default))
-    except ValueError:
-        return default
-
-
-# How easily the voice detector decides "someone is talking" (0 to 1).
-# Higher = catches quieter voices (and more far-away chatter); lower = you
-# have to speak up a bit. The library's own default is 0.4.
-VOICE_SENSITIVITY = _setting("EVE_VOICE_SENSITIVITY", 0.25)
-
-# Hands-free listening ignores any phrase quieter than this (0 to 1), so
-# people talking across the room don't count. Someone near the mic is far
-# louder than someone a few metres away. Tune it with the self-test at the
-# bottom of this file: it prints the level of everything it hears.
-# 0 switches the check off. Push-to-talk (Space) is never checked.
-MIN_VOICE_LEVEL = _setting("EVE_MIN_VOICE_LEVEL", 0.015)
-
-
-def voice_level(audio) -> float:
-    """
-    How loud a recorded phrase was, from 0 (silent) to 1 (as loud as possible).
-
-    The recording is chopped into 30 ms slices and each slice's loudness is
-    measured (RMS: the "average size" of the sound wave). A phrase also has
-    pauses and quiet bits, so we don't average everything: we take a slice
-    near the top (90th percentile), which is roughly "how loud the speech was".
-    """
-    if audio is None or len(audio) == 0:
-        return 0.0
-    audio = np.asarray(audio, dtype=np.float32)
-    size = int(SAMPLE_RATE * 0.03)
-    usable = len(audio) // size * size
-    if usable == 0:
-        return float(np.sqrt(np.mean(audio ** 2)))
-    slices = audio[:usable].reshape(-1, size)
-    loudness = np.sqrt(np.mean(slices ** 2, axis=1))
-    return float(np.percentile(loudness, 90))
 
 # A "hint" Whisper reads before listening. Mentioning Eve here makes it expect
 # that name, so "Hi Eve" stops coming out as "Hive" or "I ease".
@@ -113,7 +62,6 @@ class SpeechToText:
             language="en",
             initial_prompt=HINT,
             initial_prompt_realtime=HINT,
-            silero_sensitivity=VOICE_SENSITIVITY,
             spinner=False,            # no spinning text in the terminal
             no_log_file=True,         # don't write a log file into the project folder
             # Live caption: a second, tiny model transcribes while you're still talking.
@@ -129,7 +77,6 @@ class SpeechToText:
         self._not_waiting = threading.Event()
         self._not_waiting.set()
         self.last_phrase_started = 0.0   # when the last overheard phrase began (time.time())
-        self.last_phrase_level = 0.0     # how loud it was (see voice_level)
 
     def start(self) -> None:
         """Start recording right now (talk key pressed)."""
@@ -185,20 +132,9 @@ class SpeechToText:
             self.last_phrase_started = recorder.recording_start_time
         finally:
             self._not_waiting.set()
+        # Now turn the recorded phrase into text (this part takes a moment).
         with self._whisper_lock:
-            # Fetch the recorded sound and check how loud it was BEFORE
-            # turning it into text, so far-away voices are dropped cheaply.
-            recorder.wait_audio()
-            if recorder.is_shut_down:
-                return ""
-            level = voice_level(recorder.audio)
-            self.last_phrase_level = level
-            if level < MIN_VOICE_LEVEL:
-                logging.getLogger("eve").debug(
-                    f"Ignored a quiet voice (level {level:.3f}, needs {MIN_VOICE_LEVEL:.3f})")
-                return ""
-            # Loud enough: turn it into text (this part takes a moment).
-            return (recorder.transcribe() or "").strip()
+            return (recorder.text() or "").strip()
 
     def stop_listening(self, stop: threading.Event) -> None:
         """
@@ -268,16 +204,9 @@ if __name__ == "__main__":
     try:
         if sys.argv[1:] == ["listen"]:
             print("Always listening. Say something, then pause. Ctrl+C to stop.")
-            print(f"Phrases quieter than {MIN_VOICE_LEVEL:.3f} are ignored "
-                  f"(EVE_MIN_VOICE_LEVEL in .env). Voice sensitivity: {VOICE_SENSITIVITY}.")
             never = threading.Event()
             while True:
-                heard = stt.listen_for_phrase(never)
-                level = stt.last_phrase_level
-                if level < MIN_VOICE_LEVEL:
-                    print(f"\nlevel {level:.3f}  IGNORED (too quiet)")
-                else:
-                    print(f"\nlevel {level:.3f}  Heard: \"{heard}\"")
+                print(f"\nHeard: \"{stt.listen_for_phrase(never)}\"")
         while True:
             if input("\nPress Enter to talk (q to quit): ").strip().lower() == "q":
                 break
