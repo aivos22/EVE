@@ -6,9 +6,11 @@ If it's missing, it's created with the defaults below the first time it's
 needed. It's read fresh every time an action runs, so your changes work
 straight away, with no restart.
 
-This is an ALLOWLIST: E.V.E. can only open what's written in this file.
-Whatever name Gemini passes is only used to LOOK UP an entry here; it's
-never run as a command itself.
+For apps, this list comes first, then the Start Menu (see actions/apps.py):
+an app she finds there is added to this file by herself, marked
+"added_by": "E.V.E.". Websites and folders are an ALLOWLIST: she can
+only open what's written here. Whatever name Gemini passes is only used
+to LOOK UP an entry; it's never run as a command itself.
 
 Each app has a friendly name, a few other names you might call it, and how
 to open it. Three ways work on any PC, without knowing where it's installed:
@@ -37,6 +39,7 @@ import ctypes
 import json
 import os
 import re
+import threading
 import uuid
 from pathlib import Path
 
@@ -304,6 +307,35 @@ def find(section: str, name: str):
         if wanted in {simplify(n) for n in [friendly, *entry["names"]]}:
             return friendly, entry
     return None, None
+
+
+_save_lock = threading.Lock()
+
+
+def add_app(friendly: str, entry: dict) -> bool:
+    """
+    Add an app E.V.E. found by herself to data/actions.json. Returns True if
+    it was added. Nothing you wrote is changed: if an app already has that
+    name or opens the same way, or the file has a mistake in it, it's left
+    alone. The new entry is marked "added_by": "E.V.E.", so you can tell
+    which ones she added (and edit or delete them like any other).
+    """
+    with _save_lock:   # two saves at once must not overwrite each other
+        load()   # makes sure the file exists, and stops here if it's broken
+        raw = json.loads(SETTINGS_FILE.read_text(encoding="utf-8-sig"))
+        apps = raw.setdefault("apps", {})
+        if not isinstance(apps, dict):
+            return False
+        opens = {simplify(str(app.get("open", ""))) for app in apps.values() if isinstance(app, dict)}
+        if simplify(friendly) in {simplify(name) for name in apps} or simplify(entry["open"]) in opens:
+            return False
+        apps[friendly] = entry
+        # Write to a spare file first, then swap it in, so a crash halfway
+        # through can never leave you with half a settings file.
+        spare = SETTINGS_FILE.with_suffix(".json.saving")
+        spare.write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
+        spare.replace(SETTINGS_FILE)
+        return True
 
 
 def known_names(section: str) -> list[str]:
