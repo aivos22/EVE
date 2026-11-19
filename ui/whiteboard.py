@@ -13,8 +13,10 @@ note underneath fades in after it. Click the board to skip to the end.
 
 Two ways to see it:
   - docked: it lies over the eye, like the chat log (that's the default)
-  - popped out: POP OUT turns it into its own window that you can move,
-    resize or put on another screen. DOCK puts it back over the eye.
+  - popped out: POP OUT turns it into its own see-through window, like the
+    HUD. Drag its title strip to move it (to another screen too) and its
+    edges to resize it. DOCK puts it back over the eye.
+Both are see-through (BOARD_ALPHA below says how much).
 It remembers which you chose, and where the popped-out window was
 (data/whiteboard_window.json).
 
@@ -48,6 +50,12 @@ PAUSE_SECONDS = 0.35   # breath between steps
 MARGIN = 26            # space round the edge of the board
 NUMBER_WIDTH = 42      # room on the left for the step numbers
 ROW_GAP = 20           # space between steps
+
+# How see-through the board's background is: 0 = fully clear, 255 = solid.
+# Lower lets more of the eye (or your desktop, when popped out) show through,
+# but light text gets harder to read over bright things behind it.
+BOARD_ALPHA = 150
+EDGE = 8   # popped out: how close to an edge (pixels) the mouse must be to resize
 
 INK = theme.TEXT
 NOTE_INK = theme.TEXT_DIM
@@ -345,7 +353,10 @@ class Whiteboard(QFrame):
         """Make it a window of its own."""
         self.popped = True
         self.setParent(None)
-        self.setWindowFlags(Qt.Window)
+        # No Windows title bar, and a see-through background, like the HUD.
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setMouseTracking(True)   # to show a resize arrow over the edges
         self.setAttribute(Qt.WA_ShowWithoutActivating)   # don't steal the keyboard when it appears
         self.setWindowTitle("E.V.E. Whiteboard")
         self.setWindowIcon(self._hud.windowIcon())
@@ -363,6 +374,7 @@ class Whiteboard(QFrame):
         self._save_spot(popped_out=False)
         self.popped = False
         self.setParent(self._hud)   # back inside the main window
+        self.setCursor(Qt.ArrowCursor)
         self._style()
         self._show_title()
         self.popped_changed.emit(False)   # the main window places it over the eye
@@ -400,6 +412,51 @@ class Whiteboard(QFrame):
         if self.popped and self.isVisible():
             self._save_timer.start()
 
+    # --- Popped out: drag the title strip to move, an edge to resize -------------
+
+    def _edges_at(self, point) -> Qt.Edge:
+        edges = Qt.Edge(0)
+        if point.x() < EDGE:
+            edges |= Qt.LeftEdge
+        elif point.x() >= self.width() - EDGE:
+            edges |= Qt.RightEdge
+        if point.y() < EDGE:
+            edges |= Qt.TopEdge
+        elif point.y() >= self.height() - EDGE:
+            edges |= Qt.BottomEdge
+        return edges
+
+    def mousePressEvent(self, event):
+        # Clicks on the board itself are handled by the board (skip the
+        # writing); this gets the clicks on the title strip and the border.
+        if not self.popped or event.button() != Qt.LeftButton:
+            return
+        handle = self.windowHandle()
+        if not handle:
+            return
+        point = event.position().toPoint()
+        edges = self._edges_at(point)
+        if edges:
+            handle.startSystemResize(edges)   # Windows does the resizing, smoothly
+        elif point.y() < self.scroll.geometry().top():
+            handle.startSystemMove()
+
+    def mouseMoveEvent(self, event):
+        if not self.popped:
+            return
+        edges = self._edges_at(event.position().toPoint())
+        horizontal = edges & (Qt.LeftEdge | Qt.RightEdge)
+        vertical = edges & (Qt.TopEdge | Qt.BottomEdge)
+        if horizontal and vertical:
+            corner = edges in (Qt.LeftEdge | Qt.TopEdge, Qt.RightEdge | Qt.BottomEdge)
+            self.setCursor(Qt.SizeFDiagCursor if corner else Qt.SizeBDiagCursor)
+        elif horizontal:
+            self.setCursor(Qt.SizeHorCursor)
+        elif vertical:
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            self.setCursor(Qt.ArrowCursor)
+
     def closeEvent(self, event):
         # The window's own X (when popped out) just hides it; E.V.E. carries on.
         event.ignore()
@@ -427,15 +484,14 @@ class Whiteboard(QFrame):
                                    else "Put the whiteboard in its own window")
 
     def _style(self) -> None:
-        # Popped out it's a normal window, so it needs a solid background.
+        # Tinted glass: dark, but see-through (BOARD_ALPHA), docked or popped out.
         background = QColor(theme.BACKGROUND)
-        if self.popped:
-            background.setAlpha(255)
+        background.setAlpha(BOARD_ALPHA)
         self.setStyleSheet(f"""
             #whiteboard {{
                 background: {background.name(QColor.HexArgb)};
-                border: {"none" if self.popped else f"1px solid {theme.CYAN_DIM.name(QColor.HexArgb)}"};
-                border-radius: {0 if self.popped else 10}px;
+                border: 1px solid {theme.CYAN_DIM.name(QColor.HexArgb)};
+                border-radius: 10px;
             }}
         """)
 
