@@ -86,6 +86,7 @@ def open_app(name: str) -> dict:
         return {"error": str(error), "say": SETTINGS_BROKEN}
     if friendly is None:
         return _open_from_start_menu(name)
+    watch = _watch_for(friendly, entry)
     try:
         launch(entry["open"])
     except NotFound as problem:
@@ -95,7 +96,25 @@ def open_app(name: str) -> dict:
     except OSError as error:   # Windows refused, e.g. the shortcut is broken
         return {"error": f"Windows couldn't open {friendly}: {error.strerror or error}",
                 "say": f"Windows wouldn't open {friendly} for me, sir."}
+    if watch:
+        watch.start()
     return {"opened": friendly, "say": f"Opening {friendly}, sir."}
+
+
+def _watch_for(friendly: str, entry: dict | None):
+    """
+    If we don't know for sure which program this app runs as, start
+    watching (BEFORE it opens) so she can learn it: see actions/process_watch.py.
+    Apps she added herself are always watched, as a shortcut can point to a launcher.
+    """
+    if entry and entry.get("process") and entry.get("added_by") != "E.V.E.":
+        return None   # sir's own process line: nothing to learn
+    from actions.process_watch import ProcessWatch   # (here, as it uses close.py, which uses this file)
+    try:
+        return ProcessWatch(friendly)
+    except Exception:
+        diary.warning(f"Couldn't start watching {friendly} open", exc_info=True)
+        return None
 
 
 # Said when data/actions.json can't be read. (The exact reason goes in the diary.)
@@ -315,12 +334,15 @@ def _open_from_start_menu(name: str) -> dict:
             return {"choices": choices, "say": f"Did you mean {choices[0]}, sir?"}
         listed = ", ".join(choices[:-1]) + " or " + choices[-1]
         return {"choices": choices, "say": f"I found a few, sir: {listed}. Which one?"}
+    watch = _watch_for(best.name, None)
     try:
         os.startfile(best.target)
     except OSError as error:
         return {"error": f"Windows couldn't open {best.name}: {error.strerror or error}",
                 "say": f"Windows wouldn't open {best.name} for me, sir."}
     _remember(best, name)
+    if watch:
+        watch.start()   # (after _remember, so the app is in the file to add its program to)
     return {"opened": best.name, "say": f"Opening {best.name}, sir."}
 
 

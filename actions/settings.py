@@ -338,6 +338,36 @@ def add_app(friendly: str, entry: dict) -> bool:
         return True
 
 
+def add_processes(friendly: str, programs: list[str]) -> list[str]:
+    """
+    Add program names E.V.E. saw an app running as (e.g. "Discord.exe") to
+    its "process" line, so close_app can close it. Returns the ones added.
+    Only for apps with no process line yet, or ones she added herself: a
+    process line you wrote is left exactly as it is.
+    """
+    with _save_lock:
+        load()   # stops here if the file is broken
+        raw = json.loads(SETTINGS_FILE.read_text(encoding="utf-8-sig"))
+        app = (raw.get("apps") or {}).get(friendly)
+        if not isinstance(app, dict):
+            return []
+        have = app.get("process") if isinstance(app.get("process"), list) else []
+        if have and app.get("added_by") != "E.V.E.":
+            return []   # sir's own process line: hands off
+        known = {str(p).lower() for p in have}
+        new = [p for p in programs if p.lower() not in known][:max(0, MAX_PROCESSES - len(have))]
+        if not new:
+            return []
+        app["process"] = [*have, *new]
+        spare = SETTINGS_FILE.with_suffix(".json.saving")
+        spare.write_text(json.dumps(raw, indent=2, ensure_ascii=False), encoding="utf-8")
+        spare.replace(SETTINGS_FILE)
+        return new
+
+
+MAX_PROCESSES = 4   # most program names she'll note for one app
+
+
 def known_names(section: str) -> list[str]:
     """The friendly names in one section, e.g. ["Notepad", "Spotify", ...]."""
     return list(load()[section])
