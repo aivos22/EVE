@@ -33,6 +33,7 @@ into a reply, so it can be tested on its own:  .venv\\Scripts\\python -m brain
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,9 @@ try:
 except ImportError:
     TOOLS = []
 MAX_TOOL_ROUNDS = 3   # at most this many look-ups before she must answer
+# After she looks at the screen, she keeps the picture (in memory only, never on
+# disk) for follow-up questions, until it's gone this long without being asked about.
+SCREENSHOT_KEEP_MINUTES = 10
 
 
 @dataclass
@@ -126,6 +130,14 @@ def explain(error: Exception) -> str:
     return f"{type(error).__name__}: {error}"[:90]
 
 
+@dataclass
+class Screenshot:
+    """A picture of sir's screen she's keeping for follow-up questions."""
+    jpeg: bytes
+    taken: str          # clock time, e.g. "14:05"
+    last_used: float    # when it was last sent with a question (time.monotonic())
+
+
 class Brain:
     def __init__(self):
         api_key = os.getenv("GEMINI_API_KEY")
@@ -159,6 +171,8 @@ class Brain:
         # with None when the tools are done. The voice uses it for the log and
         # the eye's LOOKING state. On its own, we print it.
         self.on_tool = lambda text: text and print(f"       ({text})")
+        # The last look at sir's screen, kept for follow-up questions (see _with_screenshot).
+        self.screenshot: Screenshot | None = None
 
     # --- Modes ----------------------------------------------------------
 
@@ -305,7 +319,9 @@ class Brain:
         # This list grows during the rounds: the tool requests and results are
         # added to it. They're NOT saved in her long-term history, which only
         # keeps what you said and what she said, so it stays small.
-        contents = self.history + [message]
+        # (The screenshot, if she's still keeping one, rides along with his
+        # question, but never goes into her history.)
+        contents = self.history + [self._with_screenshot(message)]
         # Her instructions (personality + date + memory) are made ONCE per
         # question. If she saves a fact mid-answer, she shouldn't then see it
         # in her memory and think she "already knew" it.
@@ -360,12 +376,13 @@ class Brain:
                 self.on_tool(describe_tool(request.name, args))
                 result = run_tool(request.name, args, said=said)
                 # A screenshot can't go in the (text-only) result, so it's
-                # sent as a picture next to it. It only ever lives in this
-                # `contents` list, never in her history, so once she has
-                # answered it's gone (see actions/screen.py).
+                # sent as a picture next to it. It's never put in her history
+                # or the chat log; she keeps it in memory for follow-up
+                # questions for a while (see _with_screenshot and actions/screen.py).
                 image = result.pop("_image", None)
                 if image:
                     pictures.append(types.Part.from_bytes(data=image, mime_type="image/jpeg"))
+                    self._keep_screenshot(image)
                 quick_lines.append(result.get("say"))
                 results.append(types.Part(function_response=types.FunctionResponse(
                     id=request.id, name=request.name, response=result)))
@@ -397,6 +414,40 @@ class Brain:
         # ...and into the speech log file (brain/chat_log.py).
         self.chat_log.add(message.parts[0].text or "", reply)
 
+    # --- Remembering the screen for follow-up questions -------------------------
+
+    def _keep_screenshot(self, jpeg: bytes) -> None:
+        """Keep the picture she just took, replacing any older one."""
+        self.screenshot = Screenshot(jpeg, datetime.now().strftime("%H:%M"), time.monotonic())
+        self.on_note(f"Keeping the screenshot for follow-up questions "
+                     f"(memory only, gone after {SCREENSHOT_KEEP_MINUTES} quiet minutes)")
+
+    def _with_screenshot(self, message: types.Content) -> types.Content:
+        """
+        Sir's message, with the kept screenshot attached in front of it, so
+        "what about question 3?" works without looking again. Only what's
+        sent to Gemini this time: `message` itself (which goes into her
+        history and the chat log) is left as it was.
+        """
+        shot = self.screenshot
+        if shot is None:
+            return message
+        if time.monotonic() - shot.last_used > SCREENSHOT_KEEP_MINUTES * 60:
+            self.forget_screenshot(f"not asked about for {SCREENSHOT_KEEP_MINUTES} minutes")
+            return message
+        shot.last_used = time.monotonic()
+        note = (f"(This is the picture of sir's screen you took at {shot.taken}. Use it if his "
+                "message is about what's on his screen. If he says it's changed, or asks you to "
+                "look again, use look_at_screen for a new one.)")
+        return types.Content(role="user", parts=[
+            types.Part.from_bytes(data=shot.jpeg, mime_type="image/jpeg"),
+            types.Part(text=note), *message.parts])
+
+    def forget_screenshot(self, why: str) -> None:
+        if self.screenshot is not None:
+            self.screenshot = None
+            self.on_note(f"Screenshot forgotten ({why})")
+
     def _earlier_note(self) -> str:
         """Tell her which chats are from before she restarted, if any are left."""
         if not self.earlier:
@@ -410,6 +461,7 @@ class Brain:
         """Wipe the conversation memory (a fresh start)."""
         self.history.clear()
         self.earlier = 0
+        self.forget_screenshot("fresh start")
         # The log keeps the chats to read, but they won't be reloaded at start-up.
         self.chat_log.mark_fresh_start()
 

@@ -4,7 +4,8 @@ E.V.E.'s actions: things she can DO, rather than just say.
 Two kinds of tool:
   - look-ups (weather, Wikipedia, web search, memory): Gemini reads the
     result and puts it into words
-  - actions (open and close apps, open websites and files, timers, volume and media): these do something on the PC,
+  - actions (open and close apps, open websites and files, timers, volume and media,
+    writing worked answers on the whiteboard): these do something on the PC,
     and only from an allowlist (data/actions.json), never a free-form command
 
 Each one is a plain Python function with a docstring explaining what it's
@@ -41,12 +42,14 @@ from actions.screen import look_at_screen
 from actions.timers import cancel_timer, list_timers, say_duration, set_timer, tidy_label
 from actions.weather import get_weather
 from actions.web_search import search_web
+from actions.whiteboard import show_working
 from actions.websites import open_website
 from actions.wikipedia import look_up_wikipedia
 
 TOOLS = [get_weather, look_up_wikipedia, search_web, remember_about_sir, forget_about_sir,
          open_app, close_app, open_website, set_timer, cancel_timer, list_timers,
-         change_volume, control_media, look_at_screen, find_files, list_folder, open_file]
+         change_volume, control_media, look_at_screen, find_files, list_folder, open_file,
+         show_working]
 _BY_NAME = {tool.__name__: tool for tool in TOOLS}
 
 diary = logging.getLogger("eve")
@@ -64,6 +67,7 @@ LABELS = {
     "find_files": "Searching files",
     "list_folder": "Listing folder",
     "open_file": "Opening file",
+    "show_working": "Writing on the whiteboard",
 }
 
 # Tools that only run if sir's OWN message asks for them. Checked here, in
@@ -96,6 +100,7 @@ SPECIAL_LINES = {
         f"Searching {_friendly('websites', args.get('site', ''))}: {args['search']}" if args.get("search")
         else f"Opening {_friendly('websites', args.get('site', ''))}"),
     "set_timer": _timer_line,
+    "show_working": lambda args: f"Writing on the whiteboard: {args.get('subject', '')}",
     "change_volume": lambda args: {
         "set": f"Volume {args.get('level', 0)}%", "mute": "Muting", "unmute": "Unmuting",
     }.get(str(args.get("action", "")).lower(), f"Volume {args.get('action', '')}"),

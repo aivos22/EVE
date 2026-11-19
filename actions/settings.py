@@ -65,7 +65,7 @@ DEFAULTS = {
         "File Explorer": {"names": ["explorer", "files", "my files", "file manager"], "open": "explorer"},
         "Task Manager": {"names": [], "open": "taskmgr"},
         "Settings": {"names": ["windows settings", "pc settings"], "open": "ms-settings:"},
-        "Spotify": {"names": ["spotify music"], "open": "spotify:"},
+        "Spotify": {"names": ["spotify music"], "open": "start menu: Spotify"},
         "VS Code": {"names": ["code", "vscode", "visual studio code"], "open": "start menu: Visual Studio Code"},
         "Edge": {"names": ["microsoft edge"], "open": "microsoft-edge:"},
         "Chrome": {"names": ["google chrome"], "open": "start menu: Google Chrome"},
