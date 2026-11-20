@@ -24,6 +24,7 @@ from ui import theme, window_memory
 from ui.boot_sequence import BootSequence, ShutdownSequence
 from brain.rate_count import get_rate_count
 from ui.chat_log_panel import ChatLogPanel
+from ui.whiteboard import Whiteboard
 from ui.command_box import CommandBox
 from ui.control_bar import ControlBar
 from ui.event_log import EventLog
@@ -125,6 +126,7 @@ class HudWindow(QWidget):
         # (The eye can also move when the command box opens, so the chat log
         # panel follows it here too, while it's open.)
         self._gaze_timer.timeout.connect(lambda: self.chat_log_panel.isVisible() and self._place_chat_log())
+        self._gaze_timer.timeout.connect(lambda: self.whiteboard.isVisible() and self._place_whiteboard())
         self._gaze_timer.start(33)
 
         # Once a second: how many Gemini requests are left this minute.
@@ -221,6 +223,9 @@ class HudWindow(QWidget):
         # The CHAT LOG panel (L key) floats over the eye rather than taking a
         # place in the layout, so opening it never moves anything else.
         self.chat_log_panel = ChatLogPanel(self)
+        # The WHITEBOARD (D key) lies over the eye too, unless it's popped out into its own window.
+        self.whiteboard = Whiteboard(self)
+        self.whiteboard.popped_changed.connect(lambda popped: popped or self._place_whiteboard())
 
     def _build_top_bar(self) -> QHBoxLayout:
         """'E.V.E' on the left; hide (-) and close (X) buttons on the right."""
@@ -432,6 +437,8 @@ class HudWindow(QWidget):
 
     def show_chat_log(self, open_it: bool) -> None:
         self._place_chat_log()
+        if open_it and not self.whiteboard.popped:
+            self.whiteboard.set_open(False)   # they'd sit on top of each other
         self.chat_log_panel.set_open(open_it)
         self.controls.log.setChecked(open_it)
 
@@ -442,8 +449,37 @@ class HudWindow(QWidget):
         """Lay the panel exactly over the eye (called again whenever the window resizes)."""
         self.chat_log_panel.setGeometry(self.eye.geometry().adjusted(4, 4, -4, -4))
 
+    # --- The WHITEBOARD (D key; she writes worked answers on it) -----------------
+
+    def show_whiteboard(self, open_it: bool = True) -> None:
+        self.whiteboard.set_open(open_it)
+        if self.whiteboard.isVisible() and not self.whiteboard.popped:
+            self._place_whiteboard()
+            self.whiteboard.raise_()
+            self.show_chat_log(False)   # they'd sit on top of each other
+
+    def toggle_whiteboard(self) -> None:
+        if self.whiteboard.isVisible():
+            self.show_whiteboard(False)
+        elif self.whiteboard.empty:
+            self.whiteboard.write_demo()   # nothing on it yet: write an example to try it out
+            self.show_whiteboard(True)
+        else:
+            self.show_whiteboard(True)
+
+    def write_on_whiteboard(self, subject: str, steps: list, answer: str) -> None:
+        """She's writing a worked answer on the board (from the show_working tool)."""
+        if not self.whiteboard.will_pop_out:
+            self.show_hud()   # it goes over the eye, so the display needs to be on screen
+        self.whiteboard.write(subject, steps, answer)
+        self.show_whiteboard(True)
+
+    def _place_whiteboard(self) -> None:
+        self.whiteboard.place(self.eye.geometry().adjusted(4, 4, -4, -4))
+
     def shutdown(self) -> None:
         """Play the shutdown animation, then fade out and quit."""
+        self.whiteboard.set_open(False)
         self.boot.running = False   # in case we're shut down mid-boot
         window_memory.save(self.geometry())
         self.shutdown_sequence.start()
@@ -523,6 +559,8 @@ class HudWindow(QWidget):
             self.hide_hud()
         elif key == "l":
             self.toggle_chat_log()
+        elif key == "d":
+            self.toggle_whiteboard()
         elif event.key() == Qt.Key_Escape:
             self.shutdown()
 
@@ -591,6 +629,7 @@ class HudWindow(QWidget):
         if self._compact is not None:   # (not before __init__ has finished)
             self._fit_layout()
             self._place_chat_log()
+            self._place_whiteboard()
         if self.isVisible():
             self._save_timer.start()
 

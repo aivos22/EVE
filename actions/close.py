@@ -92,8 +92,8 @@ def close_app(name: str) -> dict:
                           "That one's best closed by hand.")}
     if not programs:
         return {"error": f"{friendly} has no 'process' line in data/actions.json",
-                "say": f"I don't know which program {friendly} runs as, sir. You can add a process "
-                       "line for it in the actions file in my data folder."}
+                "say": f"I don't know which program {friendly} runs as yet, sir. Ask me to open it "
+                       "once and I'll learn it, then I can close it."}
 
     running = _running(programs)
     if not running:

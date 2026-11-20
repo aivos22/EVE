@@ -13,8 +13,10 @@ How it works:
      Gemini next to sir's question (see _text_pieces in brain/gemini_brain.py).
 
 Privacy rules:
-  - the picture is NEVER written to disk; it only lives in memory for the
-    one question, and is gone once she's answered
+  - the picture is NEVER written to disk; it only lives in memory. The
+    brain keeps it for follow-up questions ("what about question 3?") and
+    forgets it after 10 minutes without one, on "start fresh", or when she
+    takes a new one (see SCREENSHOT_KEEP_MINUTES in brain/gemini_brain.py)
   - it's left out of the diary; the diary just says
     "[ACTION] Looked at screen (monitor 1 of 1, 1920x804, 210 KB, not saved)"
   - it only runs when sir asks: asked_to_look() checks his own words, in

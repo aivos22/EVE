@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from PySide6.QtWidgets import QApplication
 
 from actions import screen
+from actions import whiteboard as whiteboard_tool
 from actions.timers import get_timers
 from log_file import log_line, start_log_file
 from paths import BASE_DIR
@@ -69,6 +70,8 @@ def main():
 
     # The tray icon (by the clock): the way back after hiding the display.
     tray = TrayIcon()
+    # Brain -> window: the show_working tool writes worked answers on the whiteboard.
+    whiteboard_tool.connect(window.write_on_whiteboard)
     tray.toggle_requested.connect(window.toggle_hud)
     tray.wake_toggle_requested.connect(voice.toggle_wake)
     tray.mute_toggle_requested.connect(voice.toggle_mute)

@@ -121,7 +121,8 @@ def control_media(action: str) -> dict:
     """
     Play, pause or skip whatever is playing on sir's PC: Spotify, YouTube,
     or any other music or video. Use it when sir says play, pause, resume,
-    next song, skip, previous track, go back and so on.
+    next song, skip, previous track, go back and so on. If sir names
+    something to play ("play Blinding Lights"), use play_music instead.
 
     Args:
         action: "play_pause" (for play, pause, resume or stop), "next" or "previous".
